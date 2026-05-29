@@ -6,6 +6,8 @@ from typing import Any
 
 import pandas as pd
 
+TABLE_FLOAT_DECIMALS = 4
+
 
 def ensure_dir(path: str | Path) -> Path:
     p = Path(path)
@@ -17,7 +19,7 @@ def write_table(df: pd.DataFrame, path: str | Path) -> Path:
     path = Path(path)
     ensure_dir(path.parent)
     if path.suffix == ".csv":
-        df.to_csv(path)
+        df.to_csv(path, float_format=format_table_float)
         return path
     elif path.suffix == ".parquet":
         try:
@@ -51,3 +53,12 @@ def read_table(path: str | Path) -> pd.DataFrame:
     if path.suffix == ".pkl" or path.name.endswith(".parquet.pkl"):
         return pd.read_pickle(path)
     raise ValueError(f"Unsupported table file: {path}")
+
+
+def format_table_float(value) -> str:
+    if pd.isna(value):
+        return ""
+    rounded = round(float(value), TABLE_FLOAT_DECIMALS)
+    if rounded == 0:
+        return "0"
+    return f"{rounded:.{TABLE_FLOAT_DECIMALS}f}".rstrip("0").rstrip(".")

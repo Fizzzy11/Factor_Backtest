@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
 from factor_backtest.config import BacktestConfig, DataSourceConfig
@@ -24,6 +25,7 @@ DEFAULT_STYLE_COLUMNS = (
 
 IGNORED_EXPOSURE_COLUMNS = ("comovement",)
 DATE_COLUMNS = ("trade_date", "date")
+INDUSTRY_CODE_COLUMN = "industry"
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,35 @@ class RiskExposureData:
     style_columns: tuple[str, ...] = DEFAULT_STYLE_COLUMNS
     industry_columns: tuple[str, ...] = field(default_factory=tuple)
     warnings: tuple[str, ...] = field(default_factory=tuple)
+
+    def to_panel(self, dates: Iterable, symbols: Iterable[str]) -> "RiskExposurePanel":
+        date_index = pd.DatetimeIndex(pd.to_datetime(list(dates)), name="trade_date")
+        symbol_index = pd.Index([str(symbol) for symbol in symbols], name="symbol")
+        target_index = pd.MultiIndex.from_product([date_index, symbol_index], names=["trade_date", "symbol"])
+        aligned = self.exposures.reindex(target_index)
+        t_count = len(date_index)
+        n_count = len(symbol_index)
+        style_values = aligned.loc[:, self.style_columns].to_numpy(dtype="float64").reshape(
+            t_count,
+            n_count,
+            len(self.style_columns),
+        )
+        industry_values = aligned.loc[:, self.industry_columns].to_numpy(dtype="float64").reshape(
+            t_count,
+            n_count,
+            len(self.industry_columns),
+        )
+        industry_codes, has_multi_industry_membership = _industry_codes_from_values(industry_values)
+        return RiskExposurePanel(
+            dates=date_index,
+            symbols=symbol_index,
+            style_columns=self.style_columns,
+            industry_columns=self.industry_columns,
+            style_values=style_values,
+            industry_values=industry_values,
+            industry_codes=industry_codes,
+            has_multi_industry_membership=has_multi_industry_membership,
+        )
 
     def slice_date(self, trade_date, symbols: Iterable[str]) -> pd.DataFrame:
         date = pd.Timestamp(trade_date)
@@ -55,6 +86,18 @@ class RiskExposureData:
             daily = self.slice_date(date, symbol_index)
             values.append(pd.to_numeric(daily[column], errors="coerce") if column in daily else pd.Series(index=symbol_index, dtype="float64"))
         return pd.DataFrame(values, index=date_index, columns=symbol_index)
+
+
+@dataclass(frozen=True)
+class RiskExposurePanel:
+    dates: pd.DatetimeIndex
+    symbols: pd.Index
+    style_columns: tuple[str, ...]
+    industry_columns: tuple[str, ...]
+    style_values: np.ndarray
+    industry_values: np.ndarray
+    industry_codes: np.ndarray
+    has_multi_industry_membership: bool
 
 
 def load_risk_exposure_from_csv(
@@ -102,9 +145,14 @@ def dataframe_to_risk_exposure(
         raise ValueError(f"Missing required style exposure columns: {missing_styles}")
 
     metadata_cols = {"trade_date", "symbol", *ignored}
-    industry_cols = tuple(col for col in df.columns if col not in metadata_cols and col not in style_cols)
+    compact_industry = INDUSTRY_CODE_COLUMN in df.columns
+    if compact_industry:
+        industry_dummies, industry_cols = _expand_industry_column(df[INDUSTRY_CODE_COLUMN])
+        df = pd.concat([df.drop(columns=[INDUSTRY_CODE_COLUMN]), industry_dummies], axis=1)
+    else:
+        industry_cols = tuple(col for col in df.columns if col not in metadata_cols and col not in style_cols)
     if not industry_cols:
-        raise ValueError("Risk exposure data requires at least one industry dummy column")
+        raise ValueError("Risk exposure data requires industry column or at least one industry dummy column")
 
     keep_cols = [*style_cols, *industry_cols]
     out = df[["trade_date", "symbol", *keep_cols]].copy()
@@ -149,6 +197,42 @@ def _industry_membership_warnings(exposures: pd.DataFrame, industry_columns: tup
     if multiple:
         warnings.append(f"risk exposure has {multiple} date-symbol rows with multiple industry memberships")
     return warnings
+
+
+def _industry_codes_from_values(industry_values: np.ndarray) -> tuple[np.ndarray, bool]:
+    if industry_values.shape[2] == 0:
+        return np.full(industry_values.shape[:2], -1, dtype="int32"), False
+    clean = np.nan_to_num(industry_values, nan=0.0)
+    membership = clean > 0
+    counts = membership.sum(axis=2)
+    codes = np.full(industry_values.shape[:2], -1, dtype="int32")
+    single = counts == 1
+    if single.any():
+        codes[single] = membership.argmax(axis=2)[single].astype("int32")
+    return codes, bool((counts > 1).any())
+
+
+def _expand_industry_column(industry: pd.Series) -> tuple[pd.DataFrame, tuple[str, ...]]:
+    raw_labels = industry.dropna()
+    if pd.api.types.is_numeric_dtype(raw_labels):
+        valid_labels = [_format_industry_label(label) for label in sorted(raw_labels.unique())]
+    else:
+        valid_labels = [str(label) for label in pd.unique(raw_labels.astype(str))]
+    labels = industry.astype("string")
+    if not valid_labels:
+        return pd.DataFrame(index=industry.index), tuple()
+    dummies = pd.DataFrame(0.0, index=industry.index, columns=valid_labels)
+    for label in valid_labels:
+        dummies.loc[labels == label, label] = 1.0
+    return dummies, tuple(valid_labels)
+
+
+def _format_industry_label(label) -> str:
+    if isinstance(label, (int, np.integer)):
+        return str(int(label))
+    if isinstance(label, (float, np.floating)) and float(label).is_integer():
+        return str(int(label))
+    return str(label)
 
 
 def _pick_column(columns, candidates: Iterable[str]) -> str | None:

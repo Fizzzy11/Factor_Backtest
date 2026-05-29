@@ -1,12 +1,14 @@
 import json
 import tempfile
 import warnings
+from datetime import datetime
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
 
 import pandas as pd
 
+import factor_backtest.runner as runner_module
 import factor_backtest.sections as sections_module
 from factor_backtest.config import BacktestConfig, DataSourceConfig, PathConfig
 from factor_backtest.config import POOL_REGISTRY, PoolDefinition
@@ -14,6 +16,7 @@ from factor_backtest.risk_exposure import DEFAULT_STYLE_COLUMNS
 from factor_backtest.io import read_table
 from factor_backtest.market_data import MarketDataBundle
 from factor_backtest.runner import (
+    _dataframe_to_html,
     _write_html_report,
     render_factor_backtest_report,
     run_factor_backtest,
@@ -60,7 +63,25 @@ class PassingSection(ReportSection):
         return SectionResult(name=self.name, status="success", tables={"ok": pd.DataFrame({"x": [1]})})
 
 
-def test_runner_writes_pool_artifacts_and_isolates_section_failures():
+def test_run_directory_timestamp_uses_china_timezone(monkeypatch):
+    class FixedDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            assert getattr(tz, "key", None) == "Asia/Shanghai"
+            return datetime(2026, 5, 29, 9, 8, 7, 123456, tzinfo=tz)
+
+    monkeypatch.setattr(runner_module, "datetime", FixedDateTime)
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = BacktestConfig(output_root=Path(tmp), factor_name="factor_dm_20d")
+
+        run_dir, latest_dir = runner_module._prepare_run_directories(cfg, "factor_dm_20d")
+
+    assert run_dir.name == "20260529_090807_123456"
+    assert run_dir.parent.name == "runs"
+    assert latest_dir.name == "latest"
+
+
+def test_runner_skips_pool_artifacts_by_default_and_isolates_section_failures():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         dates = pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"])
@@ -93,12 +114,127 @@ def test_runner_writes_pool_artifacts_and_isolates_section_failures():
         assert result.latest_dir == tmp_path / "factor_dm_20d" / "latest"
         assert (result.latest_dir / "report.html").exists()
         pool_dir = result.run_dir / "pools" / "all"
+        assert not (pool_dir / "artifacts").exists()
+        meta = json.loads((result.run_dir / "run_meta.json").read_text(encoding="utf-8"))
+        assert meta["framework_version"] == "v1"
+        assert meta["artifact_level"] == "none"
+        assert result.section_status["all"]["failing"].status == "failed"
+        assert result.section_status["all"]["passing"].status == "success"
+
+
+def test_runner_writes_pool_artifacts_when_full_artifact_level_is_enabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        dates = pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"])
+        symbols = [f"S{i}" for i in range(40)]
+        factor = pd.DataFrame([range(40), range(40), range(40)], index=dates, columns=symbols, dtype=float)
+        open_price = pd.DataFrame(
+            [[10 + i for i in range(40)], [11 + i for i in range(40)], [12 + i for i in range(40)]],
+            index=dates,
+            columns=symbols,
+            dtype=float,
+        )
+        cfg = BacktestConfig(
+            output_root=tmp_path,
+            selected_pools=["all"],
+            horizons=[1],
+            factor_name="factor_dm_20d",
+            tradability_filter=False,
+            enabled_sections=["data_quality"],
+            artifact_level="full",
+        )
+
+        result = run_factor_backtest(
+            factor_df=factor,
+            market_data=MarketDataBundle(open_price=open_price),
+            config=cfg,
+            log_fn=lambda *_: None,
+        )
+
+        pool_dir = result.run_dir / "pools" / "all"
+        assert _artifact_exists(pool_dir, "aligned_factor.parquet")
         assert _artifact_exists(pool_dir, "daily_ic.parquet")
         assert _artifact_exists(pool_dir, "daily_group_returns.parquet")
         meta = json.loads((result.run_dir / "run_meta.json").read_text(encoding="utf-8"))
-        assert meta["framework_version"] == "v1"
-        assert result.section_status["all"]["failing"].status == "failed"
-        assert result.section_status["all"]["passing"].status == "success"
+        assert meta["artifact_level"] == "full"
+
+
+def test_render_plots_false_still_writes_render_derived_tables_without_pngs():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        dates = pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"])
+        symbols = [f"S{i}" for i in range(40)]
+        factor = pd.DataFrame([range(40), range(40), range(40)], index=dates, columns=symbols, dtype=float)
+        open_price = pd.DataFrame(
+            [[10 + i for i in range(40)], [11 + i for i in range(40)], [12 + i for i in range(40)]],
+            index=dates,
+            columns=symbols,
+            dtype=float,
+        )
+        cfg = BacktestConfig(
+            output_root=tmp_path,
+            selected_pools=["all"],
+            horizons=[1],
+            factor_name="factor_dm_20d",
+            tradability_filter=False,
+            enabled_sections=["group_return"],
+            artifact_level="none",
+            render_plots=False,
+        )
+
+        result = run_factor_backtest(
+            factor_df=factor,
+            market_data=MarketDataBundle(open_price=open_price),
+            config=cfg,
+            log_fn=lambda *_: None,
+        )
+
+        pool_dir = result.run_dir / "pools" / "all"
+        assert (pool_dir / "tables" / "daily_group_returns.csv").exists()
+        assert (pool_dir / "tables" / "group_return_summary.csv").exists()
+        assert (pool_dir / "tables" / "group_cumulative_returns_1d.csv").exists()
+        assert not (pool_dir / "plots" / "group_return_bar.png").exists()
+        assert not (pool_dir / "plots" / "group_cumulative_return_1d.png").exists()
+
+
+def test_run_log_records_pool_stage_and_section_timings():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        dates = pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"])
+        symbols = [f"S{i}" for i in range(40)]
+        factor = pd.DataFrame([range(40), range(40), range(40)], index=dates, columns=symbols, dtype=float)
+        open_price = pd.DataFrame(
+            [[10 + i for i in range(40)], [11 + i for i in range(40)], [12 + i for i in range(40)]],
+            index=dates,
+            columns=symbols,
+            dtype=float,
+        )
+        cfg = BacktestConfig(
+            output_root=tmp_path,
+            selected_pools=["all"],
+            horizons=[1],
+            factor_name="factor_dm_20d",
+            tradability_filter=False,
+            enabled_sections=["data_quality"],
+        )
+
+        run_factor_backtest(
+            factor_df=factor,
+            market_data=MarketDataBundle(open_price=open_price),
+            config=cfg,
+            log_fn=lambda *_: None,
+        )
+
+        log = json.loads((tmp_path / "factor_dm_20d" / "latest" / "run_log.json").read_text(encoding="utf-8"))
+        assert "timings" in log
+        assert "total_seconds" in log["timings"]
+        pool_timing = log["timings"]["pools"]["all"]
+        assert pool_timing["total_seconds"] >= 0
+        assert pool_timing["stages"]["prepare_data_seconds"] >= 0
+        assert pool_timing["stages"]["core_calculations_seconds"] >= 0
+        section_timing = pool_timing["sections"]["data_quality"]
+        assert set(section_timing) == {"compute_seconds", "render_seconds", "write_seconds", "total_seconds"}
+        assert section_timing["total_seconds"] >= section_timing["compute_seconds"]
 
 
 def test_runner_supports_multiple_ic_methods_with_compatibility_outputs():
@@ -130,9 +266,10 @@ def test_runner_supports_multiple_ic_methods_with_compatibility_outputs():
         )
 
         pool_dir = result.run_dir / "pools" / "all"
-        assert _artifact_exists(pool_dir, "daily_ic.parquet")
-        assert _artifact_exists(pool_dir, "daily_ic_spearman.parquet")
-        assert _artifact_exists(pool_dir, "daily_ic_pearson.parquet")
+        assert not (pool_dir / "artifacts").exists()
+        assert _table_exists(pool_dir, "daily_ic.csv")
+        assert _table_exists(pool_dir, "daily_ic_spearman.csv")
+        assert _table_exists(pool_dir, "daily_ic_pearson.csv")
         assert _table_exists(pool_dir, "ic_stats.csv")
         assert _table_exists(pool_dir, "ic_stats_spearman.csv")
         assert _table_exists(pool_dir, "ic_stats_pearson.csv")
@@ -212,6 +349,8 @@ def test_runner_renders_risk_exposure_sections_when_csv_source_is_configured():
         assert _table_exists(pool_dir, "factor_style_exposure_corr_summary_spearman.csv")
         assert _table_exists(pool_dir, "style_neutralized_ic_stats_spearman.csv")
         assert _table_exists(pool_dir, "style_industry_neutralized_ic_stats_spearman.csv")
+        assert not _table_exists(pool_dir, "style_neutralized_factor.csv")
+        assert not _table_exists(pool_dir, "style_industry_neutralized_factor.csv")
         assert _table_exists(pool_dir, "within_industry_group_return_summary.csv")
         assert (pool_dir / "plots" / "factor_style_exposure_corr_spearman.png").exists()
         assert (pool_dir / "plots" / "cumulative_style_neutralized_ic_spearman.png").exists()
@@ -232,6 +371,127 @@ def test_runner_renders_risk_exposure_sections_when_csv_source_is_configured():
         assert "Within-Industry 10-Group Forward Returns" in rerendered_html
         assert "Group Style Exposure G1" in rerendered_html
         assert "Group Turnover Edge Summary" in rerendered_html
+
+
+def test_runner_can_write_neutralized_factor_tables_when_enabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        dates = pd.bdate_range("2026-01-02", periods=12)
+        symbols = [f"S{i:03d}" for i in range(24)]
+        factor = pd.DataFrame(
+            [[float(i + day) for i, _ in enumerate(symbols)] for day, _ in enumerate(dates)],
+            index=dates,
+            columns=symbols,
+        )
+        open_price = pd.DataFrame(
+            [[10.0 + i * 0.1 + day * 0.02 for i, _ in enumerate(symbols)] for day, _ in enumerate(dates)],
+            index=dates,
+            columns=symbols,
+        )
+        risk_rows = []
+        for day, date in enumerate(dates):
+            for i, symbol in enumerate(symbols):
+                row = {"date": date, "symbol": symbol}
+                for style in DEFAULT_STYLE_COLUMNS:
+                    row[style] = float(i + day)
+                row["industry"] = "801760.INDX" if i < 12 else "801780.INDX"
+                risk_rows.append(row)
+        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path.parent.mkdir()
+        pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
+        cfg = BacktestConfig(
+            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            data_sources=DataSourceConfig(risk_exposure_source="csv"),
+            output_root=tmp_path / "out",
+            selected_pools=["all"],
+            horizons=[1],
+            factor_name="factor_dm_20d",
+            tradability_filter=False,
+            enabled_sections=["style_neutralized_ic", "style_industry_neutralized_ic"],
+            write_neutralized_factors=True,
+        )
+
+        result = run_factor_backtest(
+            factor_df=factor,
+            market_data=MarketDataBundle(open_price=open_price),
+            config=cfg,
+            log_fn=lambda *_: None,
+        )
+
+        pool_dir = result.run_dir / "pools" / "all"
+        assert _table_exists(pool_dir, "style_neutralized_factor.csv")
+        assert _table_exists(pool_dir, "style_industry_neutralized_factor.csv")
+
+
+def test_runner_risk_sections_accept_single_industry_code_column():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        dates = pd.bdate_range("2026-01-02", periods=14)
+        symbols = [f"S{i:03d}" for i in range(40)]
+        factor = pd.DataFrame(
+            [[float((i + day) % 40) for i, _ in enumerate(symbols)] for day, _ in enumerate(dates)],
+            index=dates,
+            columns=symbols,
+        )
+        open_price = pd.DataFrame(
+            [[10.0 + i * 0.1 + day * 0.02 for i, _ in enumerate(symbols)] for day, _ in enumerate(dates)],
+            index=dates,
+            columns=symbols,
+        )
+        risk_rows = []
+        for day, date in enumerate(dates):
+            for i, symbol in enumerate(symbols):
+                row = {"date": date, "symbol": symbol}
+                for style_idx, style in enumerate(DEFAULT_STYLE_COLUMNS):
+                    row[style] = float(i + day + style_idx * 0.1)
+                row["comovement"] = 1.0
+                row["industry"] = "801760.INDX" if i < 20 else "801780.INDX"
+                risk_rows.append(row)
+        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path.parent.mkdir()
+        pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
+        cfg = BacktestConfig(
+            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            data_sources=DataSourceConfig(risk_exposure_source="csv"),
+            output_root=tmp_path / "out",
+            selected_pools=["all"],
+            horizons=[1],
+            factor_name="factor_dm_20d",
+            tradability_filter=False,
+            enabled_sections=[
+                "factor_style_exposure",
+                "style_industry_neutralized_ic",
+                "group_exposure_diagnostics",
+                "within_industry_group_return",
+            ],
+            min_industry_ic_stocks=4,
+        )
+
+        result = run_factor_backtest(
+            factor_df=factor,
+            market_data=MarketDataBundle(open_price=open_price),
+            config=cfg,
+            log_fn=lambda *_: None,
+        )
+
+        pool_dir = result.run_dir / "pools" / "all"
+        assert _table_exists(pool_dir, "factor_style_exposure_corr_spearman.csv")
+        assert _table_exists(pool_dir, "style_industry_neutralized_ic_stats_spearman.csv")
+        assert _table_exists(pool_dir, "group_industry_exposure_daily.csv")
+        assert _table_exists(pool_dir, "group_industry_exposure_plot_label_map.csv")
+        assert _table_exists(pool_dir, "within_industry_group_return_summary.csv")
+        assert (pool_dir / "plots" / "factor_style_exposure_corr_spearman.png").exists()
+        assert (pool_dir / "plots" / "cumulative_style_industry_neutralized_ic_spearman.png").exists()
+        assert (pool_dir / "plots" / "group_industry_exposure_g1.png").exists()
+        assert (pool_dir / "plots" / "within_industry_group_return_bar.png").exists()
+
+        group_industry = result.section_status["all"]["group_exposure_diagnostics"].tables[
+            "group_industry_exposure_daily"
+        ]
+        assert {"801760.INDX", "801780.INDX"}.issubset(set(group_industry.index.get_level_values("industry")))
+        html = (result.latest_dir / "report.html").read_text(encoding="utf-8")
+        assert "Group Industry Exposure G1" in html
+        assert "Within-Industry 10-Group Forward Returns" in html
 
 
 def test_group_exposure_and_turnover_sections_render_edge_group_outputs():
@@ -521,6 +781,7 @@ def test_runner_applies_tradability_filter_on_next_trading_day():
             horizons=[1],
             tradability_filter=True,
             enabled_sections=[],
+            artifact_level="full",
         )
 
         result = run_factor_backtest(
@@ -795,6 +1056,15 @@ def test_minimal_backtest_returns_one_summary_row_per_pool():
     assert ("factor_dm_20d", "all") in summary.index
     assert "ic_mean_1d" in summary.columns
     assert "coverage_mean" in summary.columns
+
+
+def test_html_table_float_output_uses_at_most_four_decimal_places():
+    html = _dataframe_to_html(pd.DataFrame({"value": [1 / 3, 1.2, -0.00001]}))
+
+    assert "0.3333" in html
+    assert "1.2" in html
+    assert "-0.0000" not in html
+    assert "0.333333" not in html
 
 
 def test_html_report_embeds_key_tables_and_plot_links():

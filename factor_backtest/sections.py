@@ -12,12 +12,17 @@ from factor_backtest.analytics import (
     compute_daily_ic,
     compute_exposure_corr_summary,
     compute_factor_style_exposure_corr,
+    compute_factor_style_exposure_corr_from_panel,
     compute_group_exposure_diagnostics,
+    compute_group_exposure_diagnostics_from_panel,
     compute_group_turnover,
     compute_ic_stats,
+    compute_neutralized_ic_by_exposure_panel,
     compute_performance_metrics,
     compute_within_industry_group_returns,
+    compute_within_industry_group_returns_from_panel,
     neutralize_factor_by_exposure,
+    neutralize_factor_by_exposure_panel,
 )
 from factor_backtest.returns import return_label, return_slug, sort_return_labels
 
@@ -68,6 +73,7 @@ class DataQualitySection(ReportSection):
                 context["plots_dir"] / "data_quality_counts.png",
                 "Factor Coverage Counts",
                 result,
+                enabled=_plots_enabled(context),
             )
         if "data_quality_ratios" in result.tables:
             _plot_lines(
@@ -75,6 +81,7 @@ class DataQualitySection(ReportSection):
                 context["plots_dir"] / "data_quality_ratios.png",
                 "Factor Coverage and Invalid Value Ratios",
                 result,
+                enabled=_plots_enabled(context),
                 ylim=(0, 1),
             )
         return result
@@ -115,6 +122,7 @@ class CumulativeICSection(ReportSection):
                 context["plots_dir"] / f"cumulative_ic_{method}.png",
                 title,
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
         return result
@@ -148,6 +156,7 @@ class ICOverviewSection(ReportSection):
                 context["plots_dir"] / f"ic_overview_{method}.png",
                 f"20-Day Moving Average {_ic_method_label(method)}",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
         return result
@@ -188,14 +197,23 @@ class FactorStyleExposureSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         risk_exposure = context.get("risk_exposure")
-        if risk_exposure is None:
+        risk_panel = context.get("risk_exposure_panel")
+        if risk_exposure is None and risk_panel is None:
             return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
-        corr_by_method = compute_factor_style_exposure_corr(
-            context["factor"],
-            risk_exposure,
-            min_stocks=context.get("min_ic_stocks", 30),
-            methods=context.get("ic_methods", ["spearman"]),
-        )
+        if risk_panel is not None:
+            corr_by_method = compute_factor_style_exposure_corr_from_panel(
+                context["factor"],
+                risk_panel,
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
+        else:
+            corr_by_method = compute_factor_style_exposure_corr(
+                context["factor"],
+                risk_exposure,
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
         tables = {}
         for method, corr in corr_by_method.items():
             tables[f"factor_style_exposure_corr_{method}"] = corr
@@ -218,6 +236,7 @@ class FactorStyleExposureSection(ReportSection):
                 context["plots_dir"] / f"factor_style_exposure_corr_{method}.png",
                 f"Factor Style Exposure Correlation {method.title()}",
                 result,
+                enabled=_plots_enabled(context),
             )
         return result
 
@@ -227,22 +246,46 @@ class StyleNeutralizedICSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         risk_exposure = context.get("risk_exposure")
-        if risk_exposure is None:
+        risk_panel = context.get("risk_exposure_panel")
+        if risk_exposure is None and risk_panel is None:
             return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
-        neutralized, warnings = neutralize_factor_by_exposure(
-            context["factor"],
-            risk_exposure,
-            include_styles=True,
-            include_industries=False,
-            min_stocks=context.get("min_ic_stocks", 30),
-        )
-        ic_by_method = compute_daily_ic(
-            neutralized,
-            context["future_returns"],
-            min_stocks=context.get("min_ic_stocks", 30),
-            methods=context.get("ic_methods", ["spearman"]),
-        )
-        tables = {"style_neutralized_factor": neutralized}
+        if risk_panel is not None:
+            ic_by_method, warnings = compute_neutralized_ic_by_exposure_panel(
+                context["factor"],
+                context["future_returns"],
+                risk_panel,
+                include_styles=True,
+                include_industries=False,
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
+            neutralized = None
+        else:
+            neutralized, warnings = neutralize_factor_by_exposure(
+                context["factor"],
+                risk_exposure,
+                include_styles=True,
+                include_industries=False,
+                min_stocks=context.get("min_ic_stocks", 30),
+            )
+            ic_by_method = compute_daily_ic(
+                neutralized,
+                context["future_returns"],
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
+        tables = {}
+        if context.get("write_neutralized_factors", False):
+            if neutralized is None:
+                neutralized, extra_warnings = neutralize_factor_by_exposure_panel(
+                    context["factor"],
+                    risk_panel,
+                    include_styles=True,
+                    include_industries=False,
+                    min_stocks=context.get("min_ic_stocks", 30),
+                )
+                warnings.extend(warning for warning in extra_warnings if warning not in warnings)
+            tables["style_neutralized_factor"] = neutralized
         for method, ic in ic_by_method.items():
             tables[f"style_neutralized_ic_{method}"] = ic
             tables[f"cumulative_style_neutralized_ic_{method}"] = ic.cumsum()
@@ -259,6 +302,7 @@ class StyleNeutralizedICSection(ReportSection):
                 context["plots_dir"] / f"cumulative_style_neutralized_ic_{method}.png",
                 f"Cumulative Style Neutralized {_ic_method_label(method)}",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
         return result
@@ -269,22 +313,46 @@ class StyleIndustryNeutralizedICSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         risk_exposure = context.get("risk_exposure")
-        if risk_exposure is None:
+        risk_panel = context.get("risk_exposure_panel")
+        if risk_exposure is None and risk_panel is None:
             return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
-        neutralized, warnings = neutralize_factor_by_exposure(
-            context["factor"],
-            risk_exposure,
-            include_styles=True,
-            include_industries=True,
-            min_stocks=context.get("min_ic_stocks", 30),
-        )
-        ic_by_method = compute_daily_ic(
-            neutralized,
-            context["future_returns"],
-            min_stocks=context.get("min_ic_stocks", 30),
-            methods=context.get("ic_methods", ["spearman"]),
-        )
-        tables = {"style_industry_neutralized_factor": neutralized}
+        if risk_panel is not None:
+            ic_by_method, warnings = compute_neutralized_ic_by_exposure_panel(
+                context["factor"],
+                context["future_returns"],
+                risk_panel,
+                include_styles=True,
+                include_industries=True,
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
+            neutralized = None
+        else:
+            neutralized, warnings = neutralize_factor_by_exposure(
+                context["factor"],
+                risk_exposure,
+                include_styles=True,
+                include_industries=True,
+                min_stocks=context.get("min_ic_stocks", 30),
+            )
+            ic_by_method = compute_daily_ic(
+                neutralized,
+                context["future_returns"],
+                min_stocks=context.get("min_ic_stocks", 30),
+                methods=context.get("ic_methods", ["spearman"]),
+            )
+        tables = {}
+        if context.get("write_neutralized_factors", False):
+            if neutralized is None:
+                neutralized, extra_warnings = neutralize_factor_by_exposure_panel(
+                    context["factor"],
+                    risk_panel,
+                    include_styles=True,
+                    include_industries=True,
+                    min_stocks=context.get("min_ic_stocks", 30),
+                )
+                warnings.extend(warning for warning in extra_warnings if warning not in warnings)
+            tables["style_industry_neutralized_factor"] = neutralized
         for method, ic in ic_by_method.items():
             tables[f"style_industry_neutralized_ic_{method}"] = ic
             tables[f"cumulative_style_industry_neutralized_ic_{method}"] = ic.cumsum()
@@ -301,6 +369,7 @@ class StyleIndustryNeutralizedICSection(ReportSection):
                 context["plots_dir"] / f"cumulative_style_industry_neutralized_ic_{method}.png",
                 f"Cumulative Style + Industry Neutralized {_ic_method_label(method)}",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
         return result
@@ -311,14 +380,23 @@ class GroupExposureDiagnosticsSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         risk_exposure = context.get("risk_exposure")
-        if risk_exposure is None:
+        risk_panel = context.get("risk_exposure_panel")
+        if risk_exposure is None and risk_panel is None:
             return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
-        diagnostics = compute_group_exposure_diagnostics(
-            context["factor"],
-            risk_exposure,
-            n_groups=10,
-            min_stocks=context.get("min_group_stocks", 10),
-        )
+        if risk_panel is not None:
+            diagnostics = compute_group_exposure_diagnostics_from_panel(
+                context["factor"],
+                risk_panel,
+                n_groups=10,
+                min_stocks=context.get("min_group_stocks", 10),
+            )
+        else:
+            diagnostics = compute_group_exposure_diagnostics(
+                context["factor"],
+                risk_exposure,
+                n_groups=10,
+                min_stocks=context.get("min_group_stocks", 10),
+            )
         return SectionResult(
             name=self.name,
             status="success",
@@ -342,6 +420,7 @@ class GroupExposureDiagnosticsSection(ReportSection):
                     context["plots_dir"] / f"group_style_exposure_{_leg_slug(leg)}.png",
                     f"Group Style Exposure {leg}",
                     result,
+                    enabled=_plots_enabled(context),
                     linewidth=1.3,
                 )
             industry_wide = _long_exposure_table_to_wide(industry_daily, leg=leg)
@@ -353,6 +432,7 @@ class GroupExposureDiagnosticsSection(ReportSection):
                     context["plots_dir"] / f"group_industry_exposure_{_leg_slug(leg)}.png",
                     f"Group Industry Exposure {leg}",
                     result,
+                    enabled=_plots_enabled(context),
                     linewidth=1.1,
                 )
         if industry_label_rows:
@@ -388,6 +468,7 @@ class GroupTurnoverSection(ReportSection):
                 context["plots_dir"] / "group_turnover.png",
                 "10-Group Turnover",
                 result,
+                enabled=_plots_enabled(context),
                 colors=_group_colors(len(daily.columns)),
                 linewidth=1.4,
                 zero_line=False,
@@ -402,6 +483,7 @@ class GroupTurnoverSection(ReportSection):
                     context["plots_dir"] / "group_turnover_edges.png",
                     "G1 and G10 Turnover",
                     result,
+                    enabled=_plots_enabled(context),
                     linewidth=1.8,
                     zero_line=False,
                     ylim=(0, 1),
@@ -426,6 +508,7 @@ class GroupReturnSection(ReportSection):
                 context["plots_dir"] / "group_return_bar.png",
                 "10-Group Forward Returns",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
             horizon_days_map = context.get("return_horizon_days", {})
@@ -451,6 +534,7 @@ class GroupReturnSection(ReportSection):
                     context["plots_dir"] / f"group_cumulative_return_{slug}.png",
                     f"10-Group Cumulative Return {label.upper()}",
                     result,
+                    enabled=_plots_enabled(context),
                     colors=_group_colors(len(cumulative.columns)),
                     linewidth=1.8,
                     zero_line=False,
@@ -463,15 +547,25 @@ class WithinIndustryGroupReturnSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         risk_exposure = context.get("risk_exposure")
-        if risk_exposure is None:
+        risk_panel = context.get("risk_exposure_panel")
+        if risk_exposure is None and risk_panel is None:
             return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
-        daily = compute_within_industry_group_returns(
-            context["factor"],
-            context["future_returns"],
-            risk_exposure,
-            n_groups=10,
-            min_industry_stocks=context.get("min_industry_ic_stocks", 10),
-        )
+        if risk_panel is not None:
+            daily = compute_within_industry_group_returns_from_panel(
+                context["factor"],
+                context["future_returns"],
+                risk_panel,
+                n_groups=10,
+                min_industry_stocks=context.get("min_industry_ic_stocks", 10),
+            )
+        else:
+            daily = compute_within_industry_group_returns(
+                context["factor"],
+                context["future_returns"],
+                risk_exposure,
+                n_groups=10,
+                min_industry_stocks=context.get("min_industry_ic_stocks", 10),
+            )
         return SectionResult(name=self.name, status="success", tables={"within_industry_daily_group_returns": daily})
 
     def render(self, context, result: SectionResult) -> SectionResult:
@@ -485,6 +579,7 @@ class WithinIndustryGroupReturnSection(ReportSection):
                 context["plots_dir"] / "within_industry_group_return_bar.png",
                 "Within-Industry 10-Group Forward Returns",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
             horizon_days_map = context.get("return_horizon_days", {})
@@ -509,6 +604,7 @@ class WithinIndustryGroupReturnSection(ReportSection):
                     context["plots_dir"] / f"within_industry_group_cumulative_return_{slug}.png",
                     f"Within-Industry 10-Group Cumulative Return {label.upper()}",
                     result,
+                    enabled=_plots_enabled(context),
                     colors=_group_colors(len(cumulative.columns)),
                     linewidth=1.8,
                     zero_line=False,
@@ -562,6 +658,7 @@ class LayeredGroupReturnSection(ReportSection):
                 context["plots_dir"] / f"group_return_bar_{window}.png",
                 f"10-Group Forward Returns {window}",
                 result,
+                enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
             )
         return result
@@ -588,6 +685,7 @@ class LongShortSection(ReportSection):
             context["plots_dir"] / "long_short_curve.png",
             "Cumulative Long-Short Return",
             result,
+            enabled=_plots_enabled(context),
             horizon_colors=context.get("horizon_colors"),
         )
         return result
@@ -622,18 +720,25 @@ def select_plot_title(chinese_title: str, english_title: str, has_cjk_font: bool
     return english_title
 
 
+def _plots_enabled(context: dict) -> bool:
+    return bool(context.get("render_plots", True))
+
+
 def _plot_lines(
     df: pd.DataFrame,
     path,
     title: str,
     result: SectionResult,
     *,
+    enabled: bool = True,
     horizon_colors: dict[int, str] | None = None,
     colors: list[str] | None = None,
     ylim: tuple[float, float] | None = None,
     linewidth: float | None = None,
     zero_line: bool = True,
 ) -> None:
+    if not enabled:
+        return
     if df.empty:
         result.warnings.append(f"{title} has no plottable data")
         return
@@ -667,8 +772,11 @@ def _plot_bars(
     title: str,
     result: SectionResult,
     *,
+    enabled: bool = True,
     horizon_colors: dict[int, str] | None = None,
 ) -> None:
+    if not enabled:
+        return
     if df.empty:
         result.warnings.append(f"{title} has no plottable data")
         return

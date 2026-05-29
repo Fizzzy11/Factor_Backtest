@@ -6,6 +6,8 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 import shutil
+from time import perf_counter
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,7 @@ from factor_backtest.analytics import (
 from factor_backtest.config import BacktestConfig
 from factor_backtest.filters import compute_tradability_mask
 from factor_backtest.io import ensure_dir, read_json, read_table, write_json, write_table
+from factor_backtest.io import format_table_float
 from factor_backtest.market_data import MarketDataBundle
 from factor_backtest.pools import resolve_selected_pools
 from factor_backtest.risk_exposure import resolve_risk_exposure
@@ -30,6 +33,13 @@ from factor_backtest.sections import DEFAULT_SECTIONS, ReportSection, SectionRes
 
 
 RISK_EXPOSURE_SECTIONS = {
+    "factor_style_exposure",
+    "style_neutralized_ic",
+    "style_industry_neutralized_ic",
+    "group_exposure_diagnostics",
+    "within_industry_group_return",
+}
+RISK_EXPOSURE_PANEL_SECTIONS = {
     "factor_style_exposure",
     "style_neutralized_ic",
     "style_industry_neutralized_ic",
@@ -59,6 +69,7 @@ def run_factor_backtest(
     cfg = config or BacktestConfig()
     ic_methods = validate_ic_methods(cfg.ic_methods)
     resolved_factor_name = factor_name or cfg.factor_name or "unnamed_factor"
+    run_start = perf_counter()
     run_dir, latest_dir = _prepare_run_directories(cfg, resolved_factor_name)
     _log(cfg, log_fn, f"[v1] starting backtest: {resolved_factor_name}")
     _log(cfg, log_fn, f"[v1] output directory: {run_dir}")
@@ -71,9 +82,13 @@ def run_factor_backtest(
     )
     status: dict[str, dict[str, SectionResult]] = {}
     run_warnings: list[str] = list(risk_exposure.warnings) if risk_exposure is not None else []
+    timings: dict = {"pools": {}}
 
+    standardize_start = perf_counter()
     factor = _standardize_factor(factor_df)
+    timings["standardize_factor_seconds"] = _elapsed(standardize_start)
     _log(cfg, log_fn, f"[v1] computing test returns: horizons={cfg.horizons}")
+    returns_start = perf_counter()
     return_specs = build_return_specs(
         open_price=market_data.open_price,
         horizons=cfg.horizons,
@@ -81,11 +96,18 @@ def run_factor_backtest(
     )
     future_returns_all = {label: spec.data for label, spec in return_specs.items()}
     return_horizon_days = {label: spec.horizon_days for label, spec in return_specs.items()}
+    timings["build_returns_seconds"] = _elapsed(returns_start)
 
     for pool_name, pool_mask in pools.items():
+        pool_start = perf_counter()
+        pool_timing = {
+            "stages": {},
+            "sections": {},
+        }
+        timings["pools"][pool_name] = pool_timing
         _log(cfg, log_fn, f"[v1] pool {pool_name}: preparing data")
+        prepare_start = perf_counter()
         pool_dir = ensure_dir(run_dir / "pools" / pool_name)
-        artifacts_dir = ensure_dir(pool_dir / "artifacts")
         tables_dir = ensure_dir(pool_dir / "tables")
         plots_dir = ensure_dir(pool_dir / "plots")
 
@@ -124,6 +146,9 @@ def run_factor_backtest(
 
         filtered_factor = pool_factor.where(valid_mask)
         future_returns = {h: r.reindex_like(filtered_factor) for h, r in future_returns_all.items()}
+        pool_timing["stages"]["prepare_data_seconds"] = _elapsed(prepare_start)
+
+        core_start = perf_counter()
         _log(cfg, log_fn, f"[v1] pool {pool_name}: computing IC: methods={ic_methods}")
         daily_ic_by_method = compute_daily_ic(
             filtered_factor,
@@ -142,6 +167,12 @@ def run_factor_backtest(
         _log(cfg, log_fn, f"[v1] pool {pool_name}: computing long-short returns and data quality")
         daily_long_short = compute_long_short_returns(daily_group_returns)
         data_quality = compute_quality_metrics(pool_factor, pool_bool, valid_mask)
+        risk_exposure_panel = (
+            risk_exposure.to_panel(filtered_factor.index, filtered_factor.columns)
+            if risk_exposure is not None and _section_list_needs_risk_exposure_panel(section_list)
+            else None
+        )
+        pool_timing["stages"]["core_calculations_seconds"] = _elapsed(core_start)
 
         context = {
             "pool_name": pool_name,
@@ -159,37 +190,64 @@ def run_factor_backtest(
             "group_return_windows": cfg.group_return_windows,
             "return_horizon_days": return_horizon_days,
             "risk_exposure": risk_exposure,
+            "risk_exposure_panel": risk_exposure_panel,
             "ic_methods": ic_methods,
             "min_ic_stocks": cfg.min_ic_stocks,
             "min_group_stocks": cfg.min_group_stocks,
             "min_industry_ic_stocks": cfg.min_industry_ic_stocks,
+            "render_plots": cfg.render_plots,
+            "write_neutralized_factors": cfg.write_neutralized_factors,
         }
 
-        _log(cfg, log_fn, f"[v1] pool {pool_name}: writing artifacts")
-        write_table(filtered_factor, artifacts_dir / "aligned_factor.parquet")
-        write_table(valid_mask.astype(bool), artifacts_dir / "valid_mask.parquet")
-        for horizon, returns in future_returns.items():
-            write_table(returns, artifacts_dir / f"future_returns_{return_slug(horizon)}.parquet")
-        write_table(daily_ic, artifacts_dir / "daily_ic.parquet")
-        for method, method_ic in daily_ic_by_method.items():
-            write_table(method_ic, artifacts_dir / f"daily_ic_{method}.parquet")
-        write_table(daily_group_returns, artifacts_dir / "daily_group_returns.parquet")
-        write_table(daily_long_short, artifacts_dir / "daily_long_short_returns.parquet")
-        write_table(data_quality, artifacts_dir / "data_quality.parquet")
-        write_table(filter_summary, artifacts_dir / "filter_summary.parquet")
+        artifacts_start = perf_counter()
+        if cfg.artifact_level == "full":
+            _log(cfg, log_fn, f"[v1] pool {pool_name}: writing artifacts")
+            artifacts_dir = ensure_dir(pool_dir / "artifacts")
+            write_table(filtered_factor, artifacts_dir / "aligned_factor.parquet")
+            write_table(valid_mask.astype(bool), artifacts_dir / "valid_mask.parquet")
+            for horizon, returns in future_returns.items():
+                write_table(returns, artifacts_dir / f"future_returns_{return_slug(horizon)}.parquet")
+            write_table(daily_ic, artifacts_dir / "daily_ic.parquet")
+            for method, method_ic in daily_ic_by_method.items():
+                write_table(method_ic, artifacts_dir / f"daily_ic_{method}.parquet")
+            write_table(daily_group_returns, artifacts_dir / "daily_group_returns.parquet")
+            write_table(daily_long_short, artifacts_dir / "daily_long_short_returns.parquet")
+            write_table(data_quality, artifacts_dir / "data_quality.parquet")
+            write_table(filter_summary, artifacts_dir / "filter_summary.parquet")
+        else:
+            _log(cfg, log_fn, f"[v1] pool {pool_name}: skipping artifacts")
+        pool_timing["stages"]["write_artifacts_seconds"] = _elapsed(artifacts_start)
 
         status[pool_name] = {}
         for section in section_list:
             _log(cfg, log_fn, f"[v1] pool {pool_name}: running section {section.name}")
+            section_start = perf_counter()
+            compute_seconds = 0.0
+            render_seconds = 0.0
+            write_seconds = 0.0
             try:
+                compute_start = perf_counter()
                 result = section.compute(context)
-                if cfg.render_plots:
-                    result = section.render(context, result)
+                compute_seconds = _elapsed(compute_start)
+                render_start = perf_counter()
+                result = section.render(context, result)
+                render_seconds = _elapsed(render_start)
             except Exception as exc:
+                if compute_seconds == 0.0:
+                    compute_seconds = _elapsed(section_start)
                 result = SectionResult(name=section.name, status="failed", error=str(exc))
             status[pool_name][section.name] = result
+            write_start = perf_counter()
             for table_name, table in result.tables.items():
                 write_table(table, tables_dir / f"{table_name}.csv")
+            write_seconds = _elapsed(write_start)
+            pool_timing["sections"][section.name] = {
+                "compute_seconds": compute_seconds,
+                "render_seconds": render_seconds,
+                "write_seconds": write_seconds,
+                "total_seconds": _elapsed(section_start),
+            }
+        pool_timing["total_seconds"] = _elapsed(pool_start)
 
     run_meta = {
         "framework_version": cfg.framework_version,
@@ -210,10 +268,13 @@ def run_factor_backtest(
         "enabled_sections": cfg.enabled_sections,
         "group_return_windows": cfg.group_return_windows,
         "output_layout": cfg.output_layout,
+        "artifact_level": cfg.artifact_level,
         "render_plots": cfg.render_plots,
+        "write_neutralized_factors": cfg.write_neutralized_factors,
     }
+    timings["total_seconds"] = _elapsed(run_start)
     write_json(run_meta, run_dir / "run_meta.json")
-    write_json({"warnings": run_warnings, "sections": _status_to_json(status)}, run_dir / "run_log.json")
+    write_json({"warnings": run_warnings, "sections": _status_to_json(status), "timings": timings}, run_dir / "run_log.json")
     _write_html_report(run_dir, status, meta=run_meta, warnings=run_warnings)
     if latest_dir is not None:
         _sync_latest_dir(run_dir, latest_dir)
@@ -357,7 +418,7 @@ def _compat_daily_ic(daily_ic_by_method: dict[str, pd.DataFrame]) -> pd.DataFram
 
 def _prepare_run_directories(cfg: BacktestConfig, factor_name: str) -> tuple[Path, Path | None]:
     factor_root = Path(cfg.output_root) / factor_name
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    timestamp = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y%m%d_%H%M%S_%f")
     if cfg.output_layout == "latest_runs":
         run_dir = ensure_dir(factor_root / "runs" / timestamp)
         latest_dir = factor_root / "latest"
@@ -438,6 +499,10 @@ def _section_list_needs_risk_exposure(sections: list[ReportSection]) -> bool:
     return any(section.name in RISK_EXPOSURE_SECTIONS for section in sections)
 
 
+def _section_list_needs_risk_exposure_panel(sections: list[ReportSection]) -> bool:
+    return any(section.name in RISK_EXPOSURE_PANEL_SECTIONS for section in sections)
+
+
 def _status_to_json(status: dict[str, dict[str, SectionResult]]) -> dict:
     return {
         pool: {
@@ -446,6 +511,10 @@ def _status_to_json(status: dict[str, dict[str, SectionResult]]) -> dict:
         }
         for pool, sections in status.items()
     }
+
+
+def _elapsed(start: float) -> float:
+    return round(perf_counter() - start, 6)
 
 
 def _load_section_results_from_disk(pool_dir: Path) -> dict[str, SectionResult]:
@@ -680,9 +749,19 @@ def _render_report_header(meta: dict, warnings: list[str]) -> str:
         f"<tr><th>{escape(str(key))}</th><td>{escape(str(value))}</td></tr>"
         for key, value in meta.items()
     )
+    artifact_note = (
+        "完整中间矩阵已按 artifact_level=full 写入各 pool 目录下的 artifacts。"
+        if meta.get("artifact_level") == "full"
+        else "当前 artifact_level=none，不写 aligned_factor、future_returns 等大矩阵。"
+    )
+    plot_note = (
+        "本次回测已生成 PNG 图并由 report.html 引用。"
+        if meta.get("render_plots", True)
+        else "当前 render_plots=False，本次不写 PNG；完整 section tables 可后续重渲染图表。"
+    )
     parts = [
         "<p class=\"muted\">本报告汇总单次回测中各股票池的关键图表、核心统计表和模块运行状态。"
-        "完整中间结果仍保存在各 pool 目录下的 artifacts、tables 和 plots。</p>",
+        f"{artifact_note}{plot_note}</p>",
         f"<div class=\"meta\"><table>{meta_rows}</table></div>",
     ]
     if warnings:
@@ -944,7 +1023,7 @@ def _render_status_table(sections: dict[str, SectionResult]) -> str:
 
 
 def _dataframe_to_html(df: pd.DataFrame, *, max_rows: int | None = 20, max_cols: int | None = 12) -> str:
-    return df.to_html(max_rows=max_rows, max_cols=max_cols, border=0, escape=True, float_format="{:.6g}".format)
+    return df.to_html(max_rows=max_rows, max_cols=max_cols, border=0, escape=True, float_format=format_table_float)
 
 
 def _relative_report_path(run_dir: Path, path: Path) -> str:

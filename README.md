@@ -2,7 +2,7 @@
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目发布版本为 `2.0.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目发布版本为 `2.1.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -226,7 +226,7 @@ enabled_sections = "all"
 
 ## 输出结构
 
-默认会同时生成历史 run 和 latest 镜像：
+默认会同时生成历史 run 和 latest 镜像。`runs/<run_time>/` 的时间戳固定使用中国时区 `Asia/Shanghai`：
 
 ```text
 /data/zhangyuan/Factor_Backtest_Result/
@@ -260,9 +260,9 @@ cfg = BacktestConfig(output_layout="timestamp")
       report.html
       pools/
         all/
-          artifacts/
           tables/
           plots/
+          artifacts/  # 仅 artifact_level="full" 时生成
 ```
 
 输出会先按因子名分目录。运行时可以通过配置传入：
@@ -277,16 +277,18 @@ cfg = BacktestConfig(factor_name="factor_dm_20d")
 run_factor_backtest(..., factor_name="factor_dm_20d")
 ```
 
-`artifacts` 是中间结果，优先落盘；`tables` 是统计表；`plots` 是可视化图片；`report.html` 是模块状态汇总入口。
+`tables` 是统计表；`plots` 是可视化图片；`report.html` 是模块状态汇总入口。默认 `artifact_level="none"`，不会写 `aligned_factor`、`valid_mask`、`future_returns_*`、`daily_group_returns` 等中间矩阵，report、tables、plots 和重渲染不受影响。需要排查数据对齐、复用中间矩阵或做 notebook 深度复盘时，可以设置 `artifact_level="full"`。
+
+默认 `render_plots=True`，会在回测时直接生成 PNG 并让 `report.html` 引用这些图片。若设置 `render_plots=False`，则仍会执行 section 的表格派生逻辑并保存 tables 和日志，但不保存图片；后续可以通过 `render_factor_backtest_report()` 从 tables 重新生成 PNG 和报告。这个开关主要用于减少批量实验时的图片文件数量，也为后续网页端直接读表画图预留空间。
 
 每次运行完成后可以直接打开单次 run 目录下的 `report.html`。报告会按股票池分别汇总：
 
 - 本次回测参数和 warning
 - 关键图表：data quality、20D IC 移动平均、累计 IC、10 分组平均收益、按 horizon 拆分的 10 组累计收益线图、分层收益、累计多空收益
 - 关键统计表：IC statistics、group return summary、layered group return summary、cumulative long-short tail、performance metrics
-- 模块状态，以及到 `plots/`、`tables/`、`artifacts/` 的相对链接
+- 模块状态，以及到 `plots/`、`tables/`、`artifacts/` 的相对链接；`artifacts/` 只有在 `artifact_level="full"` 时存在
 
-如果服务器安装了 `pyarrow` 或 `fastparquet`，中间结果会保存为 `.parquet`。如果当前 Python 环境缺少 parquet 引擎，框架会明确保存为 `.parquet.pkl`，不会把 pickle 文件伪装成 parquet 后缀。
+如果 `artifact_level="full"` 且服务器安装了 `pyarrow` 或 `fastparquet`，中间结果会保存为 `.parquet`。如果当前 Python 环境缺少 parquet 引擎，框架会明确保存为 `.parquet.pkl`，不会把 pickle 文件伪装成 parquet 后缀。
 
 PNG 图表标题统一使用英文，避免服务器缺少中文字体时出现 `Glyph missing from font(s) DejaVu Sans` warning。HTML 报告和 CSV/JSON 说明仍保留中文。`data_quality` 会拆成 `data_quality_counts.png` 和 `data_quality_ratios.png` 两张图，避免 count 和 ratio 共用同一坐标轴。
 
@@ -294,6 +296,7 @@ PNG 图表标题统一使用英文，避免服务器缺少中文字体时出现 
 
 `long_short_curve.png` 展示的是日度多空收益差的累计和，即 `cumulative_long_short_returns = daily_long_short_returns.cumsum()`。原始日度序列仍保存为 `daily_long_short_returns`，用于后续统计指标计算。
 `long_short = G10 - G1` 是固定方向的高因子值组减低因子值组 spread 诊断，不会自动判断因子正负方向。若因子方向未知，阅读分组收益、分组暴露和分组换手时应同时看 G1 与 G10。
+`run_log.json` 会记录每次回测的 `timings`，包括全局耗时、每个 pool 的准备/核心计算/写 artifacts 阶段耗时，以及每个 section 的 compute/render/write/total 秒数。可以用它跟踪性能瓶颈；当 `artifact_level="none"` 时，写 artifacts 阶段通常接近 0。
 
 最精简版统计输出可以用于批量因子训练：
 
@@ -321,6 +324,8 @@ result = run_factor_backtest_data(
 # 如果希望 latest/ 入口也生成图表：
 render_factor_backtest_report(result.latest_dir)
 ```
+
+也可以在完整入口里显式设置 `BacktestConfig(render_plots=False)`。这个模式会保留完整的 section 表格和日志，但跳过本次运行的 PNG 生成，适合批量回测、减少图片文件数量，或后续网页端直接读取表格数据自行画图。需要 HTML/PNG 时，再用 `render_factor_backtest_report()` 从 tables 重渲染即可；默认 `render_plots=True`，仍保持当前直接画图并保存图片的行为。
 
 读取已有结果：
 
@@ -351,7 +356,7 @@ Spearman 衡量因子排序和未来收益排序的相关性，适合默认的�
 
 ## 风格暴露和行业数据
 
-如需检查因子和 Barra10 风格暴露的关系，或计算风格/行业中性化 IC，可以把风险暴露和行业 dummy 数据放在：
+如需检查因子和 Barra10 风格暴露的关系，或计算风格/行业中性化 IC，可以把风险暴露和行业数据放在：
 
 ```text
 /data/zhangyuan/risk&industry/CNE5&Industry.csv
@@ -371,17 +376,24 @@ cfg = BacktestConfig(
         risk_exposure_source="csv",
     ),
     min_industry_ic_stocks=10,
+    artifact_level="none",
+    write_neutralized_factors=False,
 )
 ```
 
-CSV 需要包含 `date`/`trade_date`、`symbol`、Barra10 风格暴露和行业 dummy。默认风格列为：
+CSV 需要包含 `date`/`trade_date`、`symbol`、Barra10 风格暴露和行业信息。行业信息支持两种格式：
+
+- 单列 `industry`：每个 `date-symbol` 一个行业名或行业码，例如 `0..30` 或 `801760.INDX`。这是推荐格式；框架会在需要行业回归或行业暴露时生成内部 dummy，并在 `within_industry_group_return` 中优先使用 compact industry code 快路径。
+- 多列 one-hot 行业 dummy：每个行业一列，属于该行业为 1，否则为 0。
+
+默认风格列为：
 
 ```text
 size, non_linear_size, momentum, liquidity, book_to_price,
 leverage, growth, earnings_yield, beta, residual_volatility
 ```
 
-`comovement` 当前会被忽略。行业归属按每日 `date-symbol` 动态读取；无行业归属的股票会在需要行业信息的计算中剔除并给 warning；多行业 dummy 为 1 时，该股票会同时参与这些行业的行业内分组计算。
+`comovement` 当前会被忽略。行业归属按每日 `date-symbol` 动态读取；无行业归属的股票会在需要行业信息的计算中剔除并给 warning。使用 one-hot 格式时，多行业 dummy 为 1 的股票会同时参与这些行业的行业内分组计算，并使用兼容路径；使用单列 `industry` 格式时，每个 `date-symbol` 只属于一个行业，行业内分组收益会使用 compact code 路径以减少逐行业 dummy 扫描。
 
 默认 `risk_exposure_source="csv"`，所以只要文件存在，`enabled_sections="all"` 会额外输出：
 
@@ -395,6 +407,10 @@ leverage, growth, earnings_yield, beta, residual_volatility
 其中 `group_turnover` 不依赖风险暴露数据；即使设置 `risk_exposure_source="none"`，`enabled_sections="all"` 仍会输出分组换手率。其他风格、行业、中性化模块依赖 `risk_exposure`。
 
 行业暴露图的图例会使用 `industry_01` 这类 ASCII 标签，避免服务器缺中文字体时产生 Matplotlib glyph warning；标签和真实行业名的对应关系保存在 `group_industry_exposure_plot_label_map`。
+
+中性化 IC 默认直接在日度 OLS residual 上计算，不再默认写出完整 residual 因子矩阵，以减少大表写入时间。若需要检查或复用 residual 因子值，可以设置 `write_neutralized_factors=True`，此时会额外输出 `style_neutralized_factor` 和 `style_industry_neutralized_factor`。
+
+风险暴露数据在每个 pool 内会先对齐成内部矩阵缓存，供 `factor_style_exposure`、中性化 IC、`group_exposure_diagnostics` 和 `within_industry_group_return` 复用。panel 会同时保留行业 dummy 矩阵和 compact industry code：中性化 IC、行业暴露诊断继续使用 dummy 口径；行业内分组收益在没有多行业重复归属时使用 code 分组，避免 `date × horizon × 行业数` 的重复全股票扫描。
 
 如果当前环境没有风险暴露文件，需要显式关闭：
 
@@ -418,7 +434,7 @@ notebooks/analyze_factor_result.ipynb
 docs/使用手册.md
 ```
 
-运行时默认会打印轻量进度日志，例如读取因子、读取 ClickHouse 行情、按股票池计算 IC、分组收益、写入 artifacts、执行报告模块和最终输出目录。可以在调用脚本中设置：
+运行时默认会打印轻量进度日志，例如读取因子、读取 ClickHouse 行情、按股票池计算 IC、分组收益、写入或跳过 artifacts、执行报告模块和最终输出目录。可以在调用脚本中设置：
 
 ```python
 verbose = False
@@ -451,7 +467,7 @@ verbose = False
 20D = open[t+21] / open[t+1]  - 1
 ```
 
-可以通过 `external_returns` 额外传入外部收益。外部收益会和内置收益同级参与由 `ic_methods` 控制的 IC、累计 IC、IC 统计、分组收益、分层收益、多空收益、performance metrics、artifacts 和 report。默认 `ic_methods=["spearman"]` 时仍输出 Spearman RankIC；启用 Pearson 后会额外输出 Pearson IC 相关表和图。
+可以通过 `external_returns` 额外传入外部收益。外部收益会和内置收益同级参与由 `ic_methods` 控制的 IC、累计 IC、IC 统计、分组收益、分层收益、多空收益、performance metrics、可选 artifacts 和 report。默认 `ic_methods=["spearman"]` 时仍输出 Spearman RankIC；启用 Pearson 后会额外输出 Pearson IC 相关表和图。
 
 外部收益支持宽表和长表。宽表要求：
 
@@ -513,7 +529,7 @@ result = run_factor_backtest(
 
 ## 取数配置集中化
 
-可变取数配置集中在 `factor_backtest.config`。当前行情、ST、停牌等可通过 ClickHouse 获取；pool 暂时仍使用 CSV；因子值长期保留文件和数据库双入口的设计空间；风格暴露和行业 dummy 当前通过 CSV 读取，并预留 ClickHouse 切换入口。
+可变取数配置集中在 `factor_backtest.config`。当前行情、ST、停牌等可通过 ClickHouse 获取；pool 暂时仍使用 CSV；因子值长期保留文件和数据库双入口的设计空间；风格暴露和行业数据当前通过 CSV 读取，并预留 ClickHouse 切换入口。
 
 ```python
 from factor_backtest import BacktestConfig

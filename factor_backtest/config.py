@@ -104,13 +104,17 @@ class BacktestConfig:
         default_factory=lambda: {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
     )
     enabled_sections: str | list[str] = "all"
+    artifact_level: Literal["full", "none"] = "none"
     winsorize_factor: bool = False
     standardize_factor: bool = False
     output_layout: Literal["latest_runs", "timestamp"] = "latest_runs"
     render_plots: bool = True
+    write_neutralized_factors: bool = False
     verbose: bool = True
 
     def __post_init__(self) -> None:
+        if self.artifact_level not in {"full", "none"}:
+            raise ValueError("artifact_level must be 'full' or 'none'")
         if self.output_root is None:
             self.output_root = self.paths.data_root / "Factor_Backtest_Result"
         else:

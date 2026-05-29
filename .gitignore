@@ -1,7 +1,10 @@
 .tools/
+.installers/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
+*_patch*.tar.gz
 .venv/
 venv/
 参考/

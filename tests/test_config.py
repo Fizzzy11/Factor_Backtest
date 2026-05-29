@@ -20,7 +20,9 @@ def test_backtest_config_defaults_match_design():
     assert cfg.enabled_sections == "all"
     assert cfg.tradability_filter is True
     assert cfg.output_layout == "latest_runs"
+    assert cfg.artifact_level == "none"
     assert cfg.render_plots is True
+    assert cfg.write_neutralized_factors is False
     assert cfg.group_return_windows == {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
     assert cfg.verbose is True
     assert cfg.data_sources.market_data_source == "clickhouse"

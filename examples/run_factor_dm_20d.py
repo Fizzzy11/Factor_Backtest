@@ -64,6 +64,9 @@ def main() -> None:
     # /data/zhangyuan/Factor_Backtest_Result/factor_dm_20d/runs/<run_time>/
     output_root = "/data/zhangyuan/Factor_Backtest_Result"
     output_layout = "latest_runs"
+    artifact_level = "none"
+    # Set to False for table-only batch runs. You can regenerate PNG/report later
+    # with render_factor_backtest_report(result.latest_dir).
     render_plots = True
 
     resolved_factor_path = factor_path or resolve_factor_path(
@@ -104,6 +107,7 @@ def main() -> None:
         standardize_factor=standardize_factor,
         enabled_sections=enabled_sections,
         output_layout=output_layout,
+        artifact_level=artifact_level,
         render_plots=render_plots,
         verbose=verbose,
     )

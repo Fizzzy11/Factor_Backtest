@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
 
-from factor_backtest.risk_exposure import RiskExposureData
+from factor_backtest.risk_exposure import RiskExposureData, RiskExposurePanel
 from factor_backtest.returns import return_label, sort_return_labels
 
 SUPPORTED_IC_METHODS = ("spearman", "pearson")
@@ -113,6 +114,32 @@ def compute_factor_style_exposure_corr(
     return out
 
 
+def compute_factor_style_exposure_corr_from_panel(
+    factor: pd.DataFrame,
+    panel: RiskExposurePanel,
+    *,
+    min_stocks: int,
+    methods: list[str] | tuple[str, ...] | str | None = None,
+) -> dict[str, pd.DataFrame]:
+    selected_methods = validate_ic_methods(methods)
+    out = {
+        method: pd.DataFrame(index=factor.index, columns=panel.style_columns, dtype="float64")
+        for method in selected_methods
+    }
+    y_values = factor.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+    for date_idx, date in enumerate(panel.dates):
+        y = y_values[date_idx]
+        x = panel.style_values[date_idx]
+        finite = np.isfinite(y)[:, None] & np.isfinite(x)
+        if "pearson" in selected_methods:
+            out["pearson"].loc[date] = _column_corr(y[:, None], x, finite=finite, min_stocks=min_stocks)
+        if "spearman" in selected_methods:
+            y_rank = pd.DataFrame(np.where(finite, y[:, None], np.nan)).rank(axis=0).to_numpy(dtype="float64")
+            x_rank = pd.DataFrame(np.where(finite, x, np.nan)).rank(axis=0).to_numpy(dtype="float64")
+            out["spearman"].loc[date] = _column_corr(y_rank, x_rank, finite=finite, min_stocks=min_stocks)
+    return out
+
+
 def compute_exposure_corr_summary(corr: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for col in corr.columns:
@@ -184,6 +211,124 @@ def neutralize_factor_by_exposure(
     return residual, warnings
 
 
+def neutralize_factor_by_exposure_panel(
+    factor: pd.DataFrame,
+    panel: RiskExposurePanel,
+    *,
+    include_styles: bool,
+    include_industries: bool,
+    min_stocks: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    residual = pd.DataFrame(index=factor.index, columns=factor.columns, dtype="float64")
+    warnings = []
+    if not include_styles and not include_industries:
+        return factor.copy(), warnings
+
+    y_values = factor.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+    total_missing_industry = 0
+    for date_idx, date in enumerate(panel.dates):
+        arrays = []
+        if include_styles:
+            arrays.append(panel.style_values[date_idx])
+        if include_industries:
+            industry = panel.industry_values[date_idx]
+            missing_industry = np.nansum(np.where(np.isfinite(industry), industry, 0.0), axis=1) == 0
+            total_missing_industry += int(missing_industry.sum())
+            arrays.append(industry)
+        else:
+            missing_industry = np.zeros(len(panel.symbols), dtype=bool)
+        if not arrays:
+            continue
+        x = np.concatenate(arrays, axis=1)
+        y = y_values[date_idx]
+        good = np.isfinite(y) & ~missing_industry & np.isfinite(x).all(axis=1)
+        if int(good.sum()) < min_stocks:
+            continue
+        x_good = x[good]
+        if include_industries and len(panel.industry_columns) > 1:
+            x_good = x_good[:, :-1]
+        design = np.column_stack([np.ones(len(x_good)), x_good])
+        y_good = y[good]
+        beta, *_ = np.linalg.lstsq(design, y_good, rcond=None)
+        fitted = design @ beta
+        residual.loc[date, panel.symbols[good]] = y_good - fitted
+    if total_missing_industry:
+        warnings.append(f"{total_missing_industry} date-symbol rows have missing industry membership and were excluded")
+    return residual, warnings
+
+
+def compute_neutralized_ic_by_exposure_panel(
+    factor: pd.DataFrame,
+    future_returns: dict[int, pd.DataFrame],
+    panel: RiskExposurePanel,
+    *,
+    include_styles: bool,
+    include_industries: bool,
+    min_stocks: int,
+    methods: list[str] | tuple[str, ...] | str | None = None,
+) -> tuple[dict[str, pd.DataFrame], list[str]]:
+    selected_methods = validate_ic_methods(methods)
+    out = {method: pd.DataFrame(index=factor.index) for method in selected_methods}
+    if not include_styles and not include_industries:
+        return compute_daily_ic(factor, future_returns, min_stocks=min_stocks, methods=selected_methods), []
+
+    y_values = factor.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+    aligned_returns = {
+        horizon: returns.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+        for horizon, returns in future_returns.items()
+    }
+    values_by_method = {
+        method: {horizon: [] for horizon in aligned_returns}
+        for method in selected_methods
+    }
+    total_missing_industry = 0
+    for date_idx, _date in enumerate(panel.dates):
+        arrays = []
+        if include_styles:
+            arrays.append(panel.style_values[date_idx])
+        if include_industries:
+            industry = panel.industry_values[date_idx]
+            missing_industry = np.nansum(np.where(np.isfinite(industry), industry, 0.0), axis=1) == 0
+            total_missing_industry += int(missing_industry.sum())
+            arrays.append(industry)
+        else:
+            missing_industry = np.zeros(len(panel.symbols), dtype=bool)
+        x = np.concatenate(arrays, axis=1)
+        y = y_values[date_idx]
+        regression_good = np.isfinite(y) & ~missing_industry & np.isfinite(x).all(axis=1)
+        residual = np.full(len(panel.symbols), np.nan, dtype="float64")
+        if int(regression_good.sum()) >= min_stocks:
+            x_good = x[regression_good]
+            if include_industries and len(panel.industry_columns) > 1:
+                x_good = x_good[:, :-1]
+            design = np.column_stack([np.ones(len(x_good)), x_good])
+            y_good = y[regression_good]
+            beta, *_ = np.linalg.lstsq(design, y_good, rcond=None)
+            residual[regression_good] = y_good - design @ beta
+        for horizon, returns_array in aligned_returns.items():
+            daily_return = returns_array[date_idx]
+            ic_good = np.isfinite(residual) & np.isfinite(daily_return)
+            if int(ic_good.sum()) < min_stocks:
+                for method in selected_methods:
+                    values_by_method[method][horizon].append(np.nan)
+                continue
+            residual_good = pd.Series(residual[ic_good])
+            return_good = pd.Series(daily_return[ic_good])
+            for method in selected_methods:
+                if method == "spearman":
+                    value = _safe_corr(residual_good.rank(), return_good.rank())
+                else:
+                    value = _safe_corr(residual_good, return_good)
+                values_by_method[method][horizon].append(float(value))
+    for method in selected_methods:
+        for horizon in aligned_returns:
+            out[method][f"ic_{return_label(horizon)}"] = values_by_method[method][horizon]
+    warnings = []
+    if total_missing_industry:
+        warnings.append(f"{total_missing_industry} date-symbol rows have missing industry membership and were excluded")
+    return out, warnings
+
+
 def compute_within_industry_group_returns(
     factor: pd.DataFrame,
     future_returns: dict[int, pd.DataFrame],
@@ -243,6 +388,139 @@ def compute_within_industry_group_returns(
     return grouped.sort_index()
 
 
+def compute_within_industry_group_returns_from_panel(
+    factor: pd.DataFrame,
+    future_returns: dict[int, pd.DataFrame],
+    panel: RiskExposurePanel,
+    *,
+    n_groups: int,
+    min_industry_stocks: int,
+) -> pd.DataFrame:
+    if not panel.has_multi_industry_membership:
+        return _compute_within_industry_group_returns_from_codes(
+            factor,
+            future_returns,
+            panel,
+            n_groups=n_groups,
+            min_industry_stocks=min_industry_stocks,
+        )
+
+    records = []
+    aligned_factor = factor.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+    aligned_returns = {
+        horizon: returns.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+        for horizon, returns in future_returns.items()
+    }
+    for date_idx, date in enumerate(panel.dates):
+        daily_factor = aligned_factor[date_idx]
+        industry_values = panel.industry_values[date_idx]
+        for horizon, returns_array in aligned_returns.items():
+            daily_return = returns_array[date_idx]
+            group_sums = np.zeros(n_groups, dtype="float64")
+            group_counts = np.zeros(n_groups, dtype="int64")
+            for industry_idx in range(len(panel.industry_columns)):
+                in_industry = np.nan_to_num(industry_values[:, industry_idx], nan=0.0) > 0
+                good = in_industry & np.isfinite(daily_factor) & np.isfinite(daily_return)
+                if int(good.sum()) < max(min_industry_stocks, n_groups):
+                    continue
+                positions = np.flatnonzero(good)
+                labels = _assign_array_groups(daily_factor[positions], n_groups=n_groups)
+                if labels is None:
+                    continue
+                group_index = labels - 1
+                np.add.at(group_sums, group_index, daily_return[positions])
+                np.add.at(group_counts, group_index, 1)
+            for group_idx, count in enumerate(group_counts):
+                if count == 0:
+                    continue
+                records.append(
+                    {
+                        "trade_date": date,
+                        "horizon": horizon,
+                        "group": group_idx + 1,
+                        "group_return": float(group_sums[group_idx] / count),
+                    }
+                )
+    if not records:
+        return pd.DataFrame(columns=["group_return"]).rename_axis(["trade_date", "horizon", "group"])
+    out = pd.DataFrame(records).set_index(["trade_date", "horizon", "group"]).sort_index()
+    out.index = pd.MultiIndex.from_arrays(
+        [
+            pd.to_datetime(out.index.get_level_values(0)),
+            out.index.get_level_values(1),
+            out.index.get_level_values(2).astype(int),
+        ],
+        names=["trade_date", "horizon", "group"],
+    )
+    return out
+
+
+def _compute_within_industry_group_returns_from_codes(
+    factor: pd.DataFrame,
+    future_returns: dict[int, pd.DataFrame],
+    panel: RiskExposurePanel,
+    *,
+    n_groups: int,
+    min_industry_stocks: int,
+) -> pd.DataFrame:
+    records = []
+    aligned_factor = factor.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+    aligned_returns = {
+        horizon: returns.reindex(index=panel.dates, columns=panel.symbols).to_numpy(dtype="float64")
+        for horizon, returns in future_returns.items()
+    }
+    min_count = max(min_industry_stocks, n_groups)
+    for date_idx, date in enumerate(panel.dates):
+        daily_factor = aligned_factor[date_idx]
+        industry_codes = panel.industry_codes[date_idx]
+        base_valid = (industry_codes >= 0) & np.isfinite(daily_factor)
+        base_positions = np.flatnonzero(base_valid)
+        if len(base_positions) < min_count:
+            continue
+        order = np.argsort(industry_codes[base_positions], kind="stable")
+        sorted_positions = base_positions[order]
+        sorted_codes = industry_codes[sorted_positions]
+        split_points = np.r_[0, np.flatnonzero(np.diff(sorted_codes)) + 1, len(sorted_positions)]
+        for horizon, returns_array in aligned_returns.items():
+            daily_return = returns_array[date_idx]
+            group_sums = np.zeros(n_groups, dtype="float64")
+            group_counts = np.zeros(n_groups, dtype="int64")
+            for start, end in zip(split_points[:-1], split_points[1:]):
+                industry_positions = sorted_positions[start:end]
+                industry_positions = industry_positions[np.isfinite(daily_return[industry_positions])]
+                if len(industry_positions) < min_count:
+                    continue
+                labels = _assign_array_groups(daily_factor[industry_positions], n_groups=n_groups)
+                if labels is None:
+                    continue
+                group_index = labels - 1
+                np.add.at(group_sums, group_index, daily_return[industry_positions])
+                np.add.at(group_counts, group_index, 1)
+            for group_idx, count in enumerate(group_counts):
+                if count == 0:
+                    continue
+                records.append(
+                    {
+                        "trade_date": date,
+                        "horizon": horizon,
+                        "group": group_idx + 1,
+                        "group_return": float(group_sums[group_idx] / count),
+                    }
+                )
+    if not records:
+        return pd.DataFrame(columns=["group_return"]).rename_axis(["trade_date", "horizon", "group"])
+    out = pd.DataFrame(records).set_index(["trade_date", "horizon", "group"]).sort_index()
+    out.index = pd.MultiIndex.from_arrays(
+        [
+            pd.to_datetime(out.index.get_level_values(0)),
+            out.index.get_level_values(1),
+            out.index.get_level_values(2).astype(int),
+        ],
+        names=["trade_date", "horizon", "group"],
+    )
+    return out
+
+
 def compute_group_exposure_diagnostics(
     factor: pd.DataFrame,
     risk_exposure: RiskExposureData,
@@ -278,6 +556,68 @@ def compute_group_exposure_diagnostics(
             leg: _mean_exposure(industry_values.loc[industry_valid], symbols)
             for leg, symbols in group_symbols.items()
             if len(symbols) > 0
+        }
+        _add_edge_differences(style_by_leg, low_group=low_group, high_group=high_group)
+        _add_edge_differences(industry_by_leg, low_group=low_group, high_group=high_group)
+
+        for leg, values in style_by_leg.items():
+            for exposure, value in values.items():
+                style_records.append(
+                    {"trade_date": date, "leg": leg, "exposure": exposure, "value": float(value)}
+                )
+        for leg, values in industry_by_leg.items():
+            for industry, value in values.items():
+                industry_records.append(
+                    {"trade_date": date, "leg": leg, "industry": industry, "value": float(value)}
+                )
+
+    style_daily = _exposure_records_to_frame(style_records, index_names=["trade_date", "leg", "exposure"])
+    industry_daily = _exposure_records_to_frame(industry_records, index_names=["trade_date", "leg", "industry"])
+    return {
+        "style_daily": style_daily,
+        "style_summary": compute_exposure_value_summary(style_daily, exposure_level="exposure"),
+        "industry_daily": industry_daily,
+        "industry_summary": compute_exposure_value_summary(industry_daily, exposure_level="industry"),
+    }
+
+
+def compute_group_exposure_diagnostics_from_panel(
+    factor: pd.DataFrame,
+    panel: RiskExposurePanel,
+    *,
+    n_groups: int,
+    min_stocks: int,
+    low_group: int = 1,
+    high_group: int = 10,
+) -> dict[str, pd.DataFrame]:
+    style_records = []
+    industry_records = []
+    aligned_factor = factor.reindex(index=panel.dates, columns=panel.symbols)
+    for date_idx, date in enumerate(panel.dates):
+        labels = _assign_factor_groups(aligned_factor.loc[date], n_groups=n_groups, min_stocks=min_stocks)
+        if labels.empty:
+            continue
+        label_positions = pd.Series(np.arange(len(panel.symbols)), index=panel.symbols).loc[labels.index]
+        group_positions = {
+            "pool": label_positions.to_numpy(dtype=int),
+            f"G{low_group}": label_positions.loc[labels == low_group].to_numpy(dtype=int),
+            f"G{high_group}": label_positions.loc[labels == high_group].to_numpy(dtype=int),
+        }
+        style_by_leg = {
+            leg: _mean_array_exposure(panel.style_values[date_idx], positions, panel.style_columns)
+            for leg, positions in group_positions.items()
+            if len(positions) > 0
+        }
+        industry_values = panel.industry_values[date_idx]
+        industry_valid = np.nansum(np.where(np.isfinite(industry_values), industry_values, 0.0), axis=1) > 0
+        industry_by_leg = {
+            leg: _mean_array_exposure(
+                industry_values,
+                positions[industry_valid[positions]],
+                panel.industry_columns,
+            )
+            for leg, positions in group_positions.items()
+            if len(positions) > 0
         }
         _add_edge_differences(style_by_leg, low_group=low_group, high_group=high_group)
         _add_edge_differences(industry_by_leg, low_group=low_group, high_group=high_group)
@@ -399,9 +739,39 @@ def _assign_factor_groups(daily_factor: pd.Series, *, n_groups: int, min_stocks:
         return pd.Series(dtype="int64")
 
 
+def _assign_array_groups(values: np.ndarray, *, n_groups: int) -> np.ndarray | None:
+    n_values = len(values)
+    if n_values < n_groups:
+        return None
+    order = np.argsort(values, kind="mergesort")
+    ranks = np.arange(1, n_values + 1, dtype="float64")
+    edges = _rank_qcut_edges(n_values, n_groups)
+    labels_sorted = np.searchsorted(edges, ranks, side="left") + 1
+    labels = np.empty(n_values, dtype="int64")
+    labels[order] = labels_sorted
+    return labels
+
+
+@lru_cache(maxsize=4096)
+def _rank_qcut_edges(n_values: int, n_groups: int) -> np.ndarray:
+    ranks = pd.Series(np.arange(1, n_values + 1, dtype="float64"))
+    return ranks.quantile(np.linspace(0.0, 1.0, n_groups + 1)).to_numpy(dtype="float64")[1:-1]
+
+
 def _mean_exposure(values: pd.DataFrame, symbols: pd.Index) -> pd.Series:
     aligned = values.reindex(symbols)
     return aligned.mean(axis=0, skipna=True)
+
+
+def _mean_array_exposure(values: np.ndarray, positions: np.ndarray, columns: tuple[str, ...]) -> pd.Series:
+    if len(positions) == 0:
+        return pd.Series(np.nan, index=columns, dtype="float64")
+    selected = values[positions]
+    finite = np.isfinite(selected)
+    counts = finite.sum(axis=0)
+    sums = np.where(finite, selected, 0.0).sum(axis=0)
+    means = np.divide(sums, counts, out=np.full(len(columns), np.nan, dtype="float64"), where=counts > 0)
+    return pd.Series(means, index=columns, dtype="float64")
 
 
 def _add_edge_differences(values_by_leg: dict[str, pd.Series], *, low_group: int, high_group: int) -> None:
@@ -434,6 +804,23 @@ def _safe_corr(left: pd.Series, right: pd.Series) -> float:
     if left.nunique(dropna=True) <= 1 or right.nunique(dropna=True) <= 1:
         return np.nan
     return left.corr(right)
+
+
+def _column_corr(left: np.ndarray, right: np.ndarray, *, finite: np.ndarray, min_stocks: int) -> np.ndarray:
+    left_2d = np.broadcast_to(left, right.shape)
+    counts = finite.sum(axis=0)
+    left_masked = np.where(finite, left_2d, np.nan)
+    right_masked = np.where(finite, right, np.nan)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        left_mean = np.nansum(left_masked, axis=0) / counts
+        right_mean = np.nansum(right_masked, axis=0) / counts
+        left_centered = np.where(finite, left_masked - left_mean, 0.0)
+        right_centered = np.where(finite, right_masked - right_mean, 0.0)
+        numerator = (left_centered * right_centered).sum(axis=0)
+        denominator = np.sqrt((left_centered**2).sum(axis=0) * (right_centered**2).sum(axis=0))
+        corr = numerator / denominator
+    corr = np.where((counts >= min_stocks) & np.isfinite(corr), corr, np.nan)
+    return corr
 
 
 def compute_ic_stats(ic: pd.DataFrame) -> pd.DataFrame:

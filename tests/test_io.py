@@ -24,3 +24,16 @@ def test_write_table_does_not_disguise_pickle_as_parquet_when_engine_missing():
         assert written == Path(tmp) / "data.parquet.pkl"
         assert written.exists()
         assert not path.exists()
+
+
+def test_write_table_csv_limits_float_output_to_four_decimal_places():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "table.csv"
+
+        write_table(pd.DataFrame({"value": [1 / 3, 1.2, -0.00001]}), path)
+
+        text = path.read_text(encoding="utf-8")
+        assert "0.3333" in text
+        assert "1.2" in text
+        assert "-0.0000" not in text
+        assert "0.333333" not in text
