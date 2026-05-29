@@ -3,6 +3,7 @@ import tempfile
 from pathlib import Path
 
 from factor_backtest.calendar import TradingCalendar
+from factor_backtest.config import POOL_REGISTRY, PoolDefinition
 from factor_backtest.market_data import derive_listed_days_from_open
 from factor_backtest.pools import load_pool_mask, resolve_selected_pools
 
@@ -57,3 +58,17 @@ def test_resolve_selected_pools_defaults_to_all():
 
     assert list(resolved) == ["all"]
     assert resolved["all"] is None
+
+
+def test_resolve_selected_pools_uses_configured_pool_dir_for_relative_registry_paths():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        pool_file = tmp_path / "tmp_pool.csv"
+        pool_file.write_text("trade_date,symbol\n2026-05-15,000001.XSHE\n", encoding="utf-8")
+        POOL_REGISTRY["tmp_relative_pool"] = PoolDefinition(path=Path("tmp_pool.csv"), display_name="tmp")
+        try:
+            resolved = resolve_selected_pools(["tmp_relative_pool"], pool_dir=tmp_path)
+        finally:
+            POOL_REGISTRY.pop("tmp_relative_pool", None)
+
+    assert bool(resolved["tmp_relative_pool"].loc[pd.Timestamp("2026-05-15"), "000001.XSHE"]) is True

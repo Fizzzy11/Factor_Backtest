@@ -18,6 +18,42 @@ class PathConfig:
     project_dir: Path = Path("/app/workspace/zhangyuan/Factor_Backtest")
     data_root: Path = Path("/data/zhangyuan")
     pool_dir: Path = Path("/data/zhangyuan/pool")
+    risk_exposure_path: Path = Path("risk&industry/CNE5&Industry.csv")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "project_dir", Path(self.project_dir))
+        object.__setattr__(self, "data_root", Path(self.data_root))
+        object.__setattr__(self, "pool_dir", Path(self.pool_dir))
+        object.__setattr__(self, "risk_exposure_path", Path(self.risk_exposure_path))
+
+
+@dataclass(frozen=True)
+class ClickHouseConfig:
+    host: str = "10.10.0.10"
+    port: int = 8123
+    username: str = "zhangyuan"
+    password: str = "zhang2026"
+
+
+@dataclass(frozen=True)
+class ClickHouseTableConfig:
+    ohlcv: str = "stock_data.view_stock_qfq_adjusted_ohlcv_v2"
+    shares: str = "cn_stock_fundamentals.shares"
+    st: str = "cn_stock_fundamentals.is_st_stock"
+    suspended: str = "cn_stock_fundamentals.is_suspended"
+    pool_membership: str | None = None
+    factor_values: str | None = None
+    risk_exposure: str | None = None
+
+
+@dataclass(frozen=True)
+class DataSourceConfig:
+    market_data_source: Literal["clickhouse"] = "clickhouse"
+    pool_source: Literal["csv", "clickhouse"] = "csv"
+    factor_source: Literal["file", "clickhouse"] = "file"
+    risk_exposure_source: Literal["none", "csv", "clickhouse"] = "csv"
+    clickhouse: ClickHouseConfig = field(default_factory=ClickHouseConfig)
+    clickhouse_tables: ClickHouseTableConfig = field(default_factory=ClickHouseTableConfig)
 
 
 @dataclass(frozen=True)
@@ -29,17 +65,18 @@ class PoolDefinition:
 
 POOL_REGISTRY: dict[str, PoolDefinition] = {
     "all": PoolDefinition(path=None, display_name="全市场", is_virtual=True),
-    "hs300_pool": PoolDefinition(path=Path("/data/zhangyuan/pool/hs300_pool.csv"), display_name="沪深300"),
-    "zz500_pool": PoolDefinition(path=Path("/data/zhangyuan/pool/zz500_pool.csv"), display_name="中证500"),
-    "zz1000_pool": PoolDefinition(path=Path("/data/zhangyuan/pool/zz1000_pool.csv"), display_name="中证1000"),
-    "gz1000_pool": PoolDefinition(path=Path("/data/zhangyuan/pool/gz1000_pool.csv"), display_name="国证1000"),
-    "gz2000_pool": PoolDefinition(path=Path("/data/zhangyuan/pool/gz2000_pool.csv"), display_name="国证2000"),
+    "hs300_pool": PoolDefinition(path=Path("hs300_pool.csv"), display_name="沪深300"),
+    "zz500_pool": PoolDefinition(path=Path("zz500_pool.csv"), display_name="中证500"),
+    "zz1000_pool": PoolDefinition(path=Path("zz1000_pool.csv"), display_name="中证1000"),
+    "zz2000_pool": PoolDefinition(path=Path("zz2000_pool.csv"), display_name="中证2000"),
+    "gz1000_pool": PoolDefinition(path=Path("gz1000_pool.csv"), display_name="国证1000"),
+    "gz2000_pool": PoolDefinition(path=Path("gz2000_pool.csv"), display_name="国证2000"),
     "gzMidsmallcap_pool": PoolDefinition(
-        path=Path("/data/zhangyuan/pool/gzMidsmallcap_pool.csv"),
+        path=Path("gzMidsmallcap_pool.csv"),
         display_name="国证中小盘800",
     ),
     "miMicrocap_pool": PoolDefinition(
-        path=Path("/data/zhangyuan/pool/miMicrocap_pool.csv"),
+        path=Path("miMicrocap_pool.csv"),
         display_name="米筐微盘",
     ),
 }
@@ -49,6 +86,7 @@ POOL_REGISTRY: dict[str, PoolDefinition] = {
 class BacktestConfig:
     framework_version: str = "v1"
     paths: PathConfig = field(default_factory=PathConfig)
+    data_sources: DataSourceConfig = field(default_factory=DataSourceConfig)
     output_root: Path | None = None
     factor_name: str | None = None
     selected_pools: list[str] = field(default_factory=lambda: ["all"])
@@ -57,8 +95,10 @@ class BacktestConfig:
     min_listed_days: int = 120
     listed_days_source: Literal["market_data", "listing_dates"] = "market_data"
     tradability_filter: bool = True
+    ic_methods: list[str] = field(default_factory=lambda: ["spearman"])
     min_ic_stocks: int = 30
     min_group_stocks: int = 10
+    min_industry_ic_stocks: int = 10
     analysis_windows: list[int] = field(default_factory=lambda: [120, 250, 750])
     group_return_windows: dict[str, int] = field(
         default_factory=lambda: {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}

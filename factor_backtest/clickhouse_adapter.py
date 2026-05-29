@@ -1,29 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import pandas as pd
 
+from factor_backtest.config import ClickHouseConfig, ClickHouseTableConfig, DataSourceConfig
 from factor_backtest.market_data import MarketDataBundle
-
-
-@dataclass(frozen=True)
-class ClickHouseConfig:
-    host: str = "10.10.0.10"
-    port: int = 8123
-    username: str = "zhangyuan"
-    password: str = "zhang2026"
 
 
 def build_market_data_sql(
     *,
     start_date: str,
     end_date: str,
-    table_ohlcv: str = "stock_data.view_stock_qfq_adjusted_ohlcv_v2",
-    table_shares: str = "cn_stock_fundamentals.shares",
-    table_st: str = "cn_stock_fundamentals.is_st_stock",
-    table_suspended: str = "cn_stock_fundamentals.is_suspended",
+    tables: ClickHouseTableConfig | None = None,
+    table_ohlcv: str | None = None,
+    table_shares: str | None = None,
+    table_st: str | None = None,
+    table_suspended: str | None = None,
 ) -> str:
+    table_cfg = tables or ClickHouseTableConfig()
+    table_ohlcv = table_ohlcv or table_cfg.ohlcv
+    table_shares = table_shares or table_cfg.shares
+    table_st = table_st or table_cfg.st
+    table_suspended = table_suspended or table_cfg.suspended
     return f"""
     SELECT
       o.symbol AS symbol,
@@ -70,13 +67,15 @@ def load_market_data_from_clickhouse(
     start_date: str,
     end_date: str,
     client=None,
-    config: ClickHouseConfig | None = None,
+    config: ClickHouseConfig | DataSourceConfig | None = None,
+    tables: ClickHouseTableConfig | None = None,
     verbose: bool = True,
     log_fn=print,
 ) -> MarketDataBundle:
     _log(verbose, log_fn, f"[v1] loading market data from ClickHouse: {start_date} -> {end_date}")
-    ch_client = client or create_clickhouse_client(config)
-    sql = build_market_data_sql(start_date=start_date, end_date=end_date)
+    clickhouse_config, table_config = _resolve_clickhouse_inputs(config, tables)
+    ch_client = client or create_clickhouse_client(clickhouse_config)
+    sql = build_market_data_sql(start_date=start_date, end_date=end_date, tables=table_config)
     raw = ch_client.query_df(sql)
     if raw.empty:
         raise RuntimeError("No market data fetched from ClickHouse.")
@@ -147,3 +146,12 @@ def _pivot(df: pd.DataFrame, value_col: str) -> pd.DataFrame:
 def _log(verbose: bool, log_fn, message: str) -> None:
     if verbose:
         log_fn(message)
+
+
+def _resolve_clickhouse_inputs(
+    config: ClickHouseConfig | DataSourceConfig | None,
+    tables: ClickHouseTableConfig | None,
+) -> tuple[ClickHouseConfig | None, ClickHouseTableConfig | None]:
+    if isinstance(config, DataSourceConfig):
+        return config.clickhouse, tables or config.clickhouse_tables
+    return config, tables

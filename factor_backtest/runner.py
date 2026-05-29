@@ -12,19 +12,30 @@ import pandas as pd
 
 from factor_backtest.analytics import (
     compute_daily_group_returns,
-    compute_daily_rank_ic,
-    compute_future_returns,
+    compute_daily_ic,
     compute_ic_stats,
     compute_long_short_returns,
     compute_performance_metrics,
     compute_quality_metrics,
+    validate_ic_methods,
 )
 from factor_backtest.config import BacktestConfig
 from factor_backtest.filters import compute_tradability_mask
 from factor_backtest.io import ensure_dir, read_json, read_table, write_json, write_table
 from factor_backtest.market_data import MarketDataBundle
 from factor_backtest.pools import resolve_selected_pools
+from factor_backtest.risk_exposure import resolve_risk_exposure
+from factor_backtest.returns import build_return_specs, return_label, return_slug, sort_return_labels
 from factor_backtest.sections import DEFAULT_SECTIONS, ReportSection, SectionResult
+
+
+RISK_EXPOSURE_SECTIONS = {
+    "factor_style_exposure",
+    "style_neutralized_ic",
+    "style_industry_neutralized_ic",
+    "group_exposure_diagnostics",
+    "within_industry_group_return",
+}
 
 
 @dataclass
@@ -41,22 +52,35 @@ def run_factor_backtest(
     market_data: MarketDataBundle,
     config: BacktestConfig | None = None,
     factor_name: str | None = None,
+    external_returns: dict | None = None,
     sections: list[ReportSection] | None = None,
     log_fn=print,
 ) -> BacktestRunResult:
     cfg = config or BacktestConfig()
+    ic_methods = validate_ic_methods(cfg.ic_methods)
     resolved_factor_name = factor_name or cfg.factor_name or "unnamed_factor"
     run_dir, latest_dir = _prepare_run_directories(cfg, resolved_factor_name)
     _log(cfg, log_fn, f"[v1] starting backtest: {resolved_factor_name}")
     _log(cfg, log_fn, f"[v1] output directory: {run_dir}")
     section_list = sections if sections is not None else _resolve_sections(cfg)
-    pools = resolve_selected_pools(cfg.selected_pools)
+    risk_exposure = resolve_risk_exposure(cfg) if _section_list_needs_risk_exposure(section_list) else None
+    pools = resolve_selected_pools(
+        cfg.selected_pools,
+        pool_source=cfg.data_sources.pool_source,
+        pool_dir=cfg.paths.pool_dir,
+    )
     status: dict[str, dict[str, SectionResult]] = {}
-    run_warnings: list[str] = []
+    run_warnings: list[str] = list(risk_exposure.warnings) if risk_exposure is not None else []
 
     factor = _standardize_factor(factor_df)
-    _log(cfg, log_fn, f"[v1] computing future returns: horizons={cfg.horizons}")
-    future_returns_all = compute_future_returns(market_data.open_price, cfg.horizons)
+    _log(cfg, log_fn, f"[v1] computing test returns: horizons={cfg.horizons}")
+    return_specs = build_return_specs(
+        open_price=market_data.open_price,
+        horizons=cfg.horizons,
+        external_returns=external_returns,
+    )
+    future_returns_all = {label: spec.data for label, spec in return_specs.items()}
+    return_horizon_days = {label: spec.horizon_days for label, spec in return_specs.items()}
 
     for pool_name, pool_mask in pools.items():
         _log(cfg, log_fn, f"[v1] pool {pool_name}: preparing data")
@@ -100,8 +124,14 @@ def run_factor_backtest(
 
         filtered_factor = pool_factor.where(valid_mask)
         future_returns = {h: r.reindex_like(filtered_factor) for h, r in future_returns_all.items()}
-        _log(cfg, log_fn, f"[v1] pool {pool_name}: computing RankIC")
-        daily_ic = compute_daily_rank_ic(filtered_factor, future_returns, min_stocks=cfg.min_ic_stocks)
+        _log(cfg, log_fn, f"[v1] pool {pool_name}: computing IC: methods={ic_methods}")
+        daily_ic_by_method = compute_daily_ic(
+            filtered_factor,
+            future_returns,
+            min_stocks=cfg.min_ic_stocks,
+            methods=ic_methods,
+        )
+        daily_ic = _compat_daily_ic(daily_ic_by_method)
         _log(cfg, log_fn, f"[v1] pool {pool_name}: computing group returns")
         daily_group_returns = compute_daily_group_returns(
             filtered_factor,
@@ -118,6 +148,7 @@ def run_factor_backtest(
             "factor": filtered_factor,
             "future_returns": future_returns,
             "daily_ic": daily_ic,
+            "daily_ic_by_method": daily_ic_by_method,
             "daily_group_returns": daily_group_returns,
             "daily_long_short_returns": daily_long_short,
             "data_quality": data_quality,
@@ -126,14 +157,22 @@ def run_factor_backtest(
             "plot_index": filtered_factor.index,
             "horizon_colors": cfg.horizon_colors,
             "group_return_windows": cfg.group_return_windows,
+            "return_horizon_days": return_horizon_days,
+            "risk_exposure": risk_exposure,
+            "ic_methods": ic_methods,
+            "min_ic_stocks": cfg.min_ic_stocks,
+            "min_group_stocks": cfg.min_group_stocks,
+            "min_industry_ic_stocks": cfg.min_industry_ic_stocks,
         }
 
         _log(cfg, log_fn, f"[v1] pool {pool_name}: writing artifacts")
         write_table(filtered_factor, artifacts_dir / "aligned_factor.parquet")
         write_table(valid_mask.astype(bool), artifacts_dir / "valid_mask.parquet")
         for horizon, returns in future_returns.items():
-            write_table(returns, artifacts_dir / f"future_returns_{horizon}d.parquet")
+            write_table(returns, artifacts_dir / f"future_returns_{return_slug(horizon)}.parquet")
         write_table(daily_ic, artifacts_dir / "daily_ic.parquet")
+        for method, method_ic in daily_ic_by_method.items():
+            write_table(method_ic, artifacts_dir / f"daily_ic_{method}.parquet")
         write_table(daily_group_returns, artifacts_dir / "daily_group_returns.parquet")
         write_table(daily_long_short, artifacts_dir / "daily_long_short_returns.parquet")
         write_table(data_quality, artifacts_dir / "data_quality.parquet")
@@ -157,8 +196,17 @@ def run_factor_backtest(
         "factor_name": resolved_factor_name,
         "selected_pools": cfg.selected_pools,
         "horizons": cfg.horizons,
+        "return_labels": list(return_specs.keys()),
+        "external_return_labels": [label for label, spec in return_specs.items() if spec.source == "external"],
+        "return_horizon_days": return_horizon_days,
+        "ic_methods": ic_methods,
         "tradability_filter": cfg.tradability_filter,
         "min_listed_days": cfg.min_listed_days,
+        "min_ic_stocks": cfg.min_ic_stocks,
+        "min_industry_ic_stocks": cfg.min_industry_ic_stocks,
+        "min_group_stocks": cfg.min_group_stocks,
+        "risk_exposure_source": cfg.data_sources.risk_exposure_source,
+        "risk_exposure_path": str(cfg.paths.risk_exposure_path),
         "enabled_sections": cfg.enabled_sections,
         "group_return_windows": cfg.group_return_windows,
         "output_layout": cfg.output_layout,
@@ -178,12 +226,23 @@ def run_factor_backtest_minimal(
     factor_df: pd.DataFrame,
     market_data: MarketDataBundle,
     config: BacktestConfig | None = None,
+    external_returns: dict | None = None,
 ) -> pd.DataFrame:
     cfg = config or BacktestConfig()
+    ic_methods = validate_ic_methods(cfg.ic_methods)
     factor = _standardize_factor(factor_df)
-    future_returns_all = compute_future_returns(market_data.open_price, cfg.horizons)
+    return_specs = build_return_specs(
+        open_price=market_data.open_price,
+        horizons=cfg.horizons,
+        external_returns=external_returns,
+    )
+    future_returns_all = {label: spec.data for label, spec in return_specs.items()}
     rows = []
-    for pool_name, pool_mask in resolve_selected_pools(cfg.selected_pools).items():
+    for pool_name, pool_mask in resolve_selected_pools(
+        cfg.selected_pools,
+        pool_source=cfg.data_sources.pool_source,
+        pool_dir=cfg.paths.pool_dir,
+    ).items():
         pool_factor, pool_bool = _apply_pool(factor, market_data.open_price, pool_mask)
         base_mask = np.isfinite(pool_factor)
         if cfg.tradability_filter:
@@ -206,7 +265,13 @@ def run_factor_backtest_minimal(
             valid_mask = base_mask
         filtered_factor = pool_factor.where(valid_mask)
         future_returns = {h: r.reindex_like(filtered_factor) for h, r in future_returns_all.items()}
-        daily_ic = compute_daily_rank_ic(filtered_factor, future_returns, min_stocks=cfg.min_ic_stocks)
+        daily_ic_by_method = compute_daily_ic(
+            filtered_factor,
+            future_returns,
+            min_stocks=cfg.min_ic_stocks,
+            methods=ic_methods,
+        )
+        daily_ic = _compat_daily_ic(daily_ic_by_method)
         group_returns = compute_daily_group_returns(
             filtered_factor,
             future_returns,
@@ -225,8 +290,8 @@ def run_factor_backtest_minimal(
             "coverage_mean": quality["coverage_ratio"].mean() if "coverage_ratio" in quality else np.nan,
             "valid_factor_count_mean": quality["valid_factor_count"].mean() if "valid_factor_count" in quality else np.nan,
         }
-        for horizon in cfg.horizons:
-            h_key = f"{horizon}d"
+        for horizon in sort_return_labels(future_returns.keys()):
+            h_key = return_label(horizon)
             ic_row = ic_stats.loc[h_key] if h_key in ic_stats.index else pd.Series(dtype=float)
             row[f"ic_mean_{h_key}"] = ic_row.get("ic_mean", np.nan)
             row[f"icir_{h_key}"] = ic_row.get("icir", np.nan)
@@ -246,6 +311,7 @@ def run_factor_backtest_data(
     market_data: MarketDataBundle,
     config: BacktestConfig | None = None,
     factor_name: str | None = None,
+    external_returns: dict | None = None,
     sections: list[ReportSection] | None = None,
     log_fn=print,
 ) -> BacktestRunResult:
@@ -255,6 +321,7 @@ def run_factor_backtest_data(
         market_data=market_data,
         config=cfg,
         factor_name=factor_name,
+        external_returns=external_returns,
         sections=sections,
         log_fn=log_fn,
     )
@@ -268,7 +335,7 @@ def render_factor_backtest_report(run_dir: str | Path) -> Path:
     for pool_dir in sorted((run_path / "pools").iterdir()):
         if not pool_dir.is_dir():
             continue
-        status[pool_dir.name] = _render_loaded_section_results(pool_dir, _load_section_results_from_disk(pool_dir))
+        status[pool_dir.name] = _render_loaded_section_results(pool_dir, _load_section_results_from_disk(pool_dir), meta)
     _write_html_report(run_path, status, meta=meta, warnings=log.get("warnings", []))
     return run_path / "report.html"
 
@@ -279,6 +346,13 @@ def _standardize_factor(factor_df: pd.DataFrame) -> pd.DataFrame:
     out.index.name = "trade_date"
     out.columns = [str(c) for c in out.columns]
     return out.sort_index().sort_index(axis=1).apply(pd.to_numeric, errors="coerce")
+
+
+def _compat_daily_ic(daily_ic_by_method: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    if "spearman" in daily_ic_by_method:
+        return daily_ic_by_method["spearman"]
+    first_method = next(iter(daily_ic_by_method))
+    return daily_ic_by_method[first_method]
 
 
 def _prepare_run_directories(cfg: BacktestConfig, factor_name: str) -> tuple[Path, Path | None]:
@@ -348,6 +422,8 @@ def _missing_tradability_fields(market_data: MarketDataBundle) -> list[str]:
 
 def _resolve_sections(cfg: BacktestConfig) -> list[ReportSection]:
     if cfg.enabled_sections == "all":
+        if cfg.data_sources.risk_exposure_source == "none":
+            return [section for section in DEFAULT_SECTIONS if section.name not in RISK_EXPOSURE_SECTIONS]
         return DEFAULT_SECTIONS
     if not isinstance(cfg.enabled_sections, list):
         raise ValueError("enabled_sections must be 'all' or a list of section names")
@@ -356,6 +432,10 @@ def _resolve_sections(cfg: BacktestConfig) -> list[ReportSection]:
     if unknown:
         raise KeyError(f"Unknown report sections: {unknown}")
     return [sections_by_name[name] for name in cfg.enabled_sections]
+
+
+def _section_list_needs_risk_exposure(sections: list[ReportSection]) -> bool:
+    return any(section.name in RISK_EXPOSURE_SECTIONS for section in sections)
 
 
 def _status_to_json(status: dict[str, dict[str, SectionResult]]) -> dict:
@@ -373,25 +453,72 @@ def _load_section_results_from_disk(pool_dir: Path) -> dict[str, SectionResult]:
     plots_dir = pool_dir / "plots"
     group_return_tables = ["daily_group_returns", "group_return_summary"]
     if tables_dir.exists():
-        group_return_tables.extend(sorted(path.stem for path in tables_dir.glob("group_cumulative_returns_*d.csv")))
+        group_return_tables.extend(sorted(path.stem for path in tables_dir.glob("group_cumulative_returns_*.csv")))
+    ic_overview_tables = ["ic_overview"]
+    cumulative_ic_tables = ["daily_ic", "cumulative_ic", "ic_stats"]
+    if tables_dir.exists():
+        ic_overview_tables.extend(sorted(path.stem for path in tables_dir.glob("ic_overview_*.csv")))
+        cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("daily_ic_*.csv")))
+        cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("cumulative_ic_*.csv")))
+        cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("ic_stats_*.csv")))
+        ic_overview_tables = list(dict.fromkeys(ic_overview_tables))
+        cumulative_ic_tables = list(dict.fromkeys(cumulative_ic_tables))
+    factor_style_tables = []
+    style_neutralized_tables = []
+    style_industry_neutralized_tables = []
+    group_exposure_tables = [
+        "group_style_exposure_daily",
+        "group_style_exposure_summary",
+        "group_industry_exposure_daily",
+        "group_industry_exposure_summary",
+    ]
+    within_industry_group_tables = ["within_industry_daily_group_returns", "within_industry_group_return_summary"]
+    if tables_dir.exists():
+        factor_style_tables.extend(sorted(path.stem for path in tables_dir.glob("factor_style_exposure_corr*.csv")))
+        style_neutralized_tables.extend(sorted(path.stem for path in tables_dir.glob("style_neutralized_*.csv")))
+        style_neutralized_tables.extend(sorted(path.stem for path in tables_dir.glob("cumulative_style_neutralized_*.csv")))
+        style_industry_neutralized_tables.extend(sorted(path.stem for path in tables_dir.glob("style_industry_neutralized_*.csv")))
+        style_industry_neutralized_tables.extend(
+            sorted(path.stem for path in tables_dir.glob("cumulative_style_industry_neutralized_*.csv"))
+        )
+        group_exposure_tables.extend(sorted(path.stem for path in tables_dir.glob("group_*_exposure_*.csv")))
+        within_industry_group_tables.extend(
+            sorted(path.stem for path in tables_dir.glob("within_industry_group_cumulative_returns_*.csv"))
+        )
     table_map = {
         "data_quality": ["data_quality", "data_quality_counts", "data_quality_ratios"],
-        "ic_overview": ["ic_overview"],
-        "cumulative_ic": ["daily_ic", "cumulative_ic", "ic_stats"],
+        "ic_overview": ic_overview_tables,
+        "cumulative_ic": cumulative_ic_tables,
+        "factor_style_exposure": list(dict.fromkeys(factor_style_tables)),
+        "style_neutralized_ic": list(dict.fromkeys(style_neutralized_tables)),
+        "style_industry_neutralized_ic": list(dict.fromkeys(style_industry_neutralized_tables)),
+        "group_exposure_diagnostics": list(dict.fromkeys(group_exposure_tables)),
         "group_return": group_return_tables,
+        "within_industry_group_return": list(dict.fromkeys(within_industry_group_tables)),
         "layered_group_return": ["layered_group_return_summary"],
         "long_short": ["daily_long_short_returns", "cumulative_long_short_returns"],
+        "group_turnover": ["daily_group_turnover", "group_turnover_summary", "group_turnover_edge_summary"],
         "performance_metrics": ["performance_metrics"],
     }
     plot_map = {
         "data_quality": ["data_quality_counts.png", "data_quality_ratios.png"],
-        "ic_overview": ["ic_overview.png"],
-        "cumulative_ic": ["cumulative_ic.png"],
+        "ic_overview": sorted(p.name for p in plots_dir.glob("ic_overview*.png")) if plots_dir.exists() else ["ic_overview.png"],
+        "cumulative_ic": sorted(p.name for p in plots_dir.glob("cumulative_ic*.png")) if plots_dir.exists() else ["cumulative_ic.png"],
+        "factor_style_exposure": sorted(p.name for p in plots_dir.glob("factor_style_exposure_corr*.png")) if plots_dir.exists() else [],
+        "style_neutralized_ic": sorted(p.name for p in plots_dir.glob("cumulative_style_neutralized_ic*.png"))
+        if plots_dir.exists()
+        else [],
+        "style_industry_neutralized_ic": sorted(p.name for p in plots_dir.glob("cumulative_style_industry_neutralized_ic*.png"))
+        if plots_dir.exists()
+        else [],
+        "group_exposure_diagnostics": sorted(p.name for p in plots_dir.glob("group_*_exposure*.png")) if plots_dir.exists() else [],
         "group_return": sorted(p.name for p in plots_dir.glob("group_cumulative_return_*.png")) + ["group_return_bar.png"]
         if plots_dir.exists()
         else ["group_return_bar.png"],
+        "within_industry_group_return": sorted(p.name for p in plots_dir.glob("within_industry_group*.png")) if plots_dir.exists() else [],
         "layered_group_return": sorted(p.name for p in plots_dir.glob("group_return_bar_*.png")) if plots_dir.exists() else [],
         "long_short": ["long_short_curve.png"],
+        "group_turnover": sorted(p.name for p in plots_dir.glob("group_turnover*.png")) if plots_dir.exists() else [],
     }
     out: dict[str, SectionResult] = {}
     for section_name, table_names in table_map.items():
@@ -416,18 +543,53 @@ def _read_section_table(path: Path, table_name: str) -> pd.DataFrame:
         df.index = pd.MultiIndex.from_arrays(
             [
                 pd.to_datetime(df.index.get_level_values(0)),
-                df.index.get_level_values(1).astype(int),
+                df.index.get_level_values(1),
                 df.index.get_level_values(2).astype(int),
             ],
             names=["trade_date", "horizon", "group"],
         )
+        return df
+    if table_name == "within_industry_daily_group_returns":
+        df = pd.read_csv(path, index_col=[0, 1, 2])
+        df.index = pd.MultiIndex.from_arrays(
+            [
+                pd.to_datetime(df.index.get_level_values(0)),
+                df.index.get_level_values(1),
+                df.index.get_level_values(2).astype(int),
+            ],
+            names=["trade_date", "horizon", "group"],
+        )
+        return df
+    if table_name in {"group_style_exposure_daily", "group_industry_exposure_daily"}:
+        df = pd.read_csv(path, index_col=[0, 1, 2])
+        exposure_level = "exposure" if table_name == "group_style_exposure_daily" else "industry"
+        df.index = pd.MultiIndex.from_arrays(
+            [
+                pd.to_datetime(df.index.get_level_values(0)),
+                df.index.get_level_values(1),
+                df.index.get_level_values(2),
+            ],
+            names=["trade_date", "leg", exposure_level],
+        )
+        return df
+    if table_name in {"group_style_exposure_summary", "group_industry_exposure_summary"}:
+        df = pd.read_csv(path, index_col=[0, 1])
+        exposure_level = "exposure" if table_name == "group_style_exposure_summary" else "industry"
+        df.index = pd.MultiIndex.from_arrays(
+            [df.index.get_level_values(0), df.index.get_level_values(1)],
+            names=["leg", exposure_level],
+        )
+        return df
+    if table_name == "daily_group_turnover":
+        df = pd.read_csv(path, index_col=0)
+        df.index = pd.to_datetime(df.index)
         return df
     if table_name == "layered_group_return_summary":
         df = pd.read_csv(path, index_col=[0, 1, 2])
         df.index = pd.MultiIndex.from_arrays(
             [
                 df.index.get_level_values(0),
-                df.index.get_level_values(1).astype(int),
+                df.index.get_level_values(1),
                 df.index.get_level_values(2).astype(int),
             ],
             names=["window", "horizon", "group"],
@@ -436,7 +598,7 @@ def _read_section_table(path: Path, table_name: str) -> pd.DataFrame:
     return read_table(path)
 
 
-def _render_loaded_section_results(pool_dir: Path, sections: dict[str, SectionResult]) -> dict[str, SectionResult]:
+def _render_loaded_section_results(pool_dir: Path, sections: dict[str, SectionResult], meta: dict | None = None) -> dict[str, SectionResult]:
     section_classes = {section.name: section for section in DEFAULT_SECTIONS}
     aligned_factor_path = pool_dir / "artifacts" / "aligned_factor.parquet"
     fallback_factor_path = aligned_factor_path.with_suffix(aligned_factor_path.suffix + ".pkl")
@@ -450,6 +612,7 @@ def _render_loaded_section_results(pool_dir: Path, sections: dict[str, SectionRe
         "plots_dir": ensure_dir(pool_dir / "plots"),
         "plot_index": plot_index,
         "horizon_colors": BacktestConfig().horizon_colors,
+        "return_horizon_days": (meta or {}).get("return_horizon_days", {}),
     }
     rendered = {}
     for name, result in sections.items():
@@ -541,19 +704,134 @@ def _render_pool_links(pool: str) -> str:
 
 
 def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
-    plot_order = [
-        ("cumulative_ic", "cumulative_ic.png", "Cumulative RankIC"),
-        ("ic_overview", "ic_overview.png", "20-Day Moving Average RankIC"),
+    ic_plot_order = []
+    cumulative_result = sections.get("cumulative_ic")
+    if cumulative_result is not None:
+        for method, title in (("spearman", "Cumulative Spearman RankIC"), ("pearson", "Cumulative Pearson IC")):
+            plot_name = f"cumulative_ic_{method}.png"
+            if plot_name in cumulative_result.plots:
+                ic_plot_order.append(("cumulative_ic", plot_name, title))
+        if not ic_plot_order and "cumulative_ic.png" in cumulative_result.plots:
+            ic_plot_order.append(("cumulative_ic", "cumulative_ic.png", "Cumulative RankIC"))
+        for plot_name in sorted(cumulative_result.plots):
+            if not plot_name.startswith("cumulative_ic_") or plot_name in {p for _, p, _ in ic_plot_order}:
+                continue
+            method = plot_name.removeprefix("cumulative_ic_").removesuffix(".png")
+            ic_plot_order.append(("cumulative_ic", plot_name, f"Cumulative {method.title()} IC"))
+    overview_plot_order = []
+    overview_result = sections.get("ic_overview")
+    if overview_result is not None:
+        for method, title in (
+            ("spearman", "20-Day Moving Average Spearman RankIC"),
+            ("pearson", "20-Day Moving Average Pearson IC"),
+        ):
+            plot_name = f"ic_overview_{method}.png"
+            if plot_name in overview_result.plots:
+                overview_plot_order.append(("ic_overview", plot_name, title))
+        if not overview_plot_order and "ic_overview.png" in overview_result.plots:
+            overview_plot_order.append(("ic_overview", "ic_overview.png", "20-Day Moving Average RankIC"))
+        for plot_name in sorted(overview_result.plots):
+            if not plot_name.startswith("ic_overview_") or plot_name in {p for _, p, _ in overview_plot_order}:
+                continue
+            method = plot_name.removeprefix("ic_overview_").removesuffix(".png")
+            overview_plot_order.append(("ic_overview", plot_name, f"20-Day Moving Average {method.title()} IC"))
+    builtin_group_plots = [
         ("group_return", "group_cumulative_return_1d.png", "10-Group Cumulative Return 1D"),
         ("group_return", "group_cumulative_return_5d.png", "10-Group Cumulative Return 5D"),
         ("group_return", "group_cumulative_return_10d.png", "10-Group Cumulative Return 10D"),
         ("group_return", "group_cumulative_return_20d.png", "10-Group Cumulative Return 20D"),
+    ]
+    group_result = sections.get("group_return")
+    known_group_plot_names = {plot_name for _, plot_name, _ in builtin_group_plots}
+    extra_group_plots = []
+    if group_result is not None:
+        for plot_name in sorted(group_result.plots):
+            if not plot_name.startswith("group_cumulative_return_") or plot_name in known_group_plot_names:
+                continue
+            label = plot_name.removeprefix("group_cumulative_return_").removesuffix(".png")
+            extra_group_plots.append(("group_return", plot_name, f"10-Group Cumulative Return {label.upper()}"))
+    plot_order = [
+        *ic_plot_order,
+        *overview_plot_order,
+        (
+            "factor_style_exposure",
+            "factor_style_exposure_corr_spearman.png",
+            "Factor Style Exposure Correlation Spearman",
+        ),
+        (
+            "factor_style_exposure",
+            "factor_style_exposure_corr_pearson.png",
+            "Factor Style Exposure Correlation Pearson",
+        ),
+        (
+            "style_neutralized_ic",
+            "cumulative_style_neutralized_ic_spearman.png",
+            "Cumulative Style Neutralized Spearman RankIC",
+        ),
+        (
+            "style_neutralized_ic",
+            "cumulative_style_neutralized_ic_pearson.png",
+            "Cumulative Style Neutralized Pearson IC",
+        ),
+        (
+            "style_industry_neutralized_ic",
+            "cumulative_style_industry_neutralized_ic_spearman.png",
+            "Cumulative Style + Industry Neutralized Spearman RankIC",
+        ),
+        (
+            "style_industry_neutralized_ic",
+            "cumulative_style_industry_neutralized_ic_pearson.png",
+            "Cumulative Style + Industry Neutralized Pearson IC",
+        ),
+        ("group_exposure_diagnostics", "group_style_exposure_g1.png", "Group Style Exposure G1"),
+        ("group_exposure_diagnostics", "group_style_exposure_g10.png", "Group Style Exposure G10"),
+        (
+            "group_exposure_diagnostics",
+            "group_style_exposure_g10_minus_g1.png",
+            "Group Style Exposure G10 - G1",
+        ),
+        ("group_exposure_diagnostics", "group_industry_exposure_g1.png", "Group Industry Exposure G1"),
+        ("group_exposure_diagnostics", "group_industry_exposure_g10.png", "Group Industry Exposure G10"),
+        (
+            "group_exposure_diagnostics",
+            "group_industry_exposure_g10_minus_g1.png",
+            "Group Industry Exposure G10 - G1",
+        ),
+        *builtin_group_plots,
+        *extra_group_plots,
         ("group_return", "group_return_bar.png", "10-Group Forward Returns"),
+        (
+            "within_industry_group_return",
+            "within_industry_group_return_bar.png",
+            "Within-Industry 10-Group Forward Returns",
+        ),
+        (
+            "within_industry_group_return",
+            "within_industry_group_cumulative_return_1d.png",
+            "Within-Industry 10-Group Cumulative Return 1D",
+        ),
+        (
+            "within_industry_group_return",
+            "within_industry_group_cumulative_return_5d.png",
+            "Within-Industry 10-Group Cumulative Return 5D",
+        ),
+        (
+            "within_industry_group_return",
+            "within_industry_group_cumulative_return_10d.png",
+            "Within-Industry 10-Group Cumulative Return 10D",
+        ),
+        (
+            "within_industry_group_return",
+            "within_industry_group_cumulative_return_20d.png",
+            "Within-Industry 10-Group Cumulative Return 20D",
+        ),
         ("layered_group_return", "group_return_bar_6m.png", "10-Group Forward Returns 6M"),
         ("layered_group_return", "group_return_bar_1y.png", "10-Group Forward Returns 1Y"),
         ("layered_group_return", "group_return_bar_3y.png", "10-Group Forward Returns 3Y"),
         ("layered_group_return", "group_return_bar_5y.png", "10-Group Forward Returns 5Y"),
         ("long_short", "long_short_curve.png", "Cumulative Long-Short Return"),
+        ("group_turnover", "group_turnover_edges.png", "G1 and G10 Turnover"),
+        ("group_turnover", "group_turnover.png", "10-Group Turnover"),
         ("data_quality", "data_quality_counts.png", "Factor Coverage Counts"),
         ("data_quality", "data_quality_ratios.png", "Factor Coverage and Invalid Value Ratios"),
     ]
@@ -573,11 +851,66 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
 
 
 def _render_key_tables(sections: dict[str, SectionResult]) -> str:
+    cumulative_result = sections.get("cumulative_ic")
+    ic_specs = []
+    if cumulative_result is not None:
+        has_pearson = "ic_stats_pearson" in cumulative_result.tables
+        if has_pearson:
+            if "ic_stats_spearman" in cumulative_result.tables:
+                ic_specs.append(("cumulative_ic", "ic_stats_spearman", "Spearman RankIC Statistics"))
+            ic_specs.append(("cumulative_ic", "ic_stats_pearson", "Pearson IC Statistics"))
+        else:
+            ic_specs.append(("cumulative_ic", "ic_stats", "IC Statistics"))
+    style_exposure_specs = []
+    style_exposure_result = sections.get("factor_style_exposure")
+    if style_exposure_result is not None:
+        if "factor_style_exposure_corr_summary_spearman" in style_exposure_result.tables:
+            style_exposure_specs.append(
+                ("factor_style_exposure", "factor_style_exposure_corr_summary_spearman", "Spearman Style Exposure Correlation Summary")
+            )
+        if "factor_style_exposure_corr_summary_pearson" in style_exposure_result.tables:
+            style_exposure_specs.append(
+                ("factor_style_exposure", "factor_style_exposure_corr_summary_pearson", "Pearson Style Exposure Correlation Summary")
+            )
+    neutralized_specs = []
+    style_neutralized_result = sections.get("style_neutralized_ic")
+    if style_neutralized_result is not None:
+        if "style_neutralized_ic_stats_spearman" in style_neutralized_result.tables:
+            neutralized_specs.append(
+                ("style_neutralized_ic", "style_neutralized_ic_stats_spearman", "Style Neutralized Spearman RankIC Statistics")
+            )
+        if "style_neutralized_ic_stats_pearson" in style_neutralized_result.tables:
+            neutralized_specs.append(("style_neutralized_ic", "style_neutralized_ic_stats_pearson", "Style Neutralized Pearson IC Statistics"))
+    style_industry_neutralized_result = sections.get("style_industry_neutralized_ic")
+    if style_industry_neutralized_result is not None:
+        if "style_industry_neutralized_ic_stats_spearman" in style_industry_neutralized_result.tables:
+            neutralized_specs.append(
+                (
+                    "style_industry_neutralized_ic",
+                    "style_industry_neutralized_ic_stats_spearman",
+                    "Style + Industry Neutralized Spearman RankIC Statistics",
+                )
+            )
+        if "style_industry_neutralized_ic_stats_pearson" in style_industry_neutralized_result.tables:
+            neutralized_specs.append(
+                (
+                    "style_industry_neutralized_ic",
+                    "style_industry_neutralized_ic_stats_pearson",
+                    "Style + Industry Neutralized Pearson IC Statistics",
+                )
+            )
     specs = [
-        ("cumulative_ic", "ic_stats", "IC Statistics"),
+        *ic_specs,
+        *style_exposure_specs,
+        *neutralized_specs,
+        ("group_exposure_diagnostics", "group_style_exposure_summary", "Group Style Exposure Summary"),
+        ("group_exposure_diagnostics", "group_industry_exposure_summary", "Group Industry Exposure Summary"),
         ("group_return", "group_return_summary", "Group Return Summary"),
+        ("within_industry_group_return", "within_industry_group_return_summary", "Within-Industry Group Return Summary"),
         ("layered_group_return", "layered_group_return_summary", "Layered Group Return Summary"),
         ("long_short", "cumulative_long_short_returns", "Cumulative Long-Short Return Tail"),
+        ("group_turnover", "group_turnover_edge_summary", "Group Turnover Edge Summary"),
+        ("group_turnover", "group_turnover_summary", "Group Turnover Summary"),
         ("performance_metrics", "performance_metrics", "Performance Metrics"),
     ]
     parts = ["<h3>关键统计表</h3>"]

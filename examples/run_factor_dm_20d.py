@@ -1,5 +1,5 @@
 from factor_backtest.clickhouse_adapter import load_market_data_from_clickhouse
-from factor_backtest.config import BacktestConfig
+from factor_backtest.config import BacktestConfig, DataSourceConfig, PathConfig
 from factor_backtest.factor_loader import load_factor_file, resolve_factor_path
 from factor_backtest.runner import run_factor_backtest
 
@@ -21,15 +21,18 @@ def main() -> None:
     market_end_date = "2026-05-02"
 
     # ===== 3. Pool parameters =====
-    # Use ["all"] for full market.
-    # Example index pools: ["hs300_pool", "gz1000_pool", "gz2000_pool"]
-    selected_pools = ["all"]
+    # Default run pools: full market + HS300 + CSI 1000 + CSI 2000.
+    # Other examples: ["all"], ["gz1000_pool", "gz2000_pool"].
+    selected_pools = ["all", "hs300_pool", "zz1000_pool", "zz2000_pool"]
 
     # ===== 4. Backtest core parameters =====
     horizons = [1, 5, 10, 20]
     min_listed_days = 120
     tradability_filter = True
+    # IC methods: ["spearman"], ["pearson"], or ["spearman", "pearson"].
+    ic_methods = ["spearman", "pearson"]
     min_ic_stocks = 30
+    # Used by group_return, group_exposure_diagnostics, and group_turnover.
     min_group_stocks = 10
     analysis_windows = [120, 250, 750]
     group_return_windows = {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
@@ -41,11 +44,19 @@ def main() -> None:
 
     # ===== 6. Report section parameters =====
     # "all" runs every built-in section.
-    # Example subset: ["data_quality", "ic_overview", "cumulative_ic"]
+    # Example subset: ["data_quality", "ic_overview", "cumulative_ic", "group_turnover"].
     enabled_sections = "all"
     verbose = True
 
-    # ===== 7. Output parameters =====
+    # ===== 7. Risk exposure and industry data =====
+    # Default uses the configured CSV. Set to "none" if the file is unavailable.
+    # /data/zhangyuan/risk&industry/CNE5&Industry.csv
+    risk_exposure_source = "csv"
+    risk_exposure_path = "risk&industry/CNE5&Industry.csv"
+    # Used by within_industry_group_return.
+    min_industry_ic_stocks = 10
+
+    # ===== 8. Output parameters =====
     # Recommended script path:
     # /app/workspace/zhangyuan/Factor_Backtest_Result/factor_dm_20d/run_factor_dm_20d.py
     # Output path:
@@ -75,14 +86,18 @@ def main() -> None:
     )
 
     cfg = BacktestConfig(
+        paths=PathConfig(data_root=data_root, risk_exposure_path=risk_exposure_path),
+        data_sources=DataSourceConfig(risk_exposure_source=risk_exposure_source),
         factor_name=factor_display_name,
         output_root=output_root,
         selected_pools=selected_pools,
         horizons=horizons,
         min_listed_days=min_listed_days,
         tradability_filter=tradability_filter,
+        ic_methods=ic_methods,
         min_ic_stocks=min_ic_stocks,
         min_group_stocks=min_group_stocks,
+        min_industry_ic_stocks=min_industry_ic_stocks,
         analysis_windows=analysis_windows,
         group_return_windows=group_return_windows,
         winsorize_factor=winsorize_factor,

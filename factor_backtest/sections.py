@@ -8,7 +8,18 @@ import pandas as pd
 
 from factor_backtest.config import DEFAULT_HORIZON_COLORS
 
-from factor_backtest.analytics import compute_ic_stats, compute_performance_metrics
+from factor_backtest.analytics import (
+    compute_daily_ic,
+    compute_exposure_corr_summary,
+    compute_factor_style_exposure_corr,
+    compute_group_exposure_diagnostics,
+    compute_group_turnover,
+    compute_ic_stats,
+    compute_performance_metrics,
+    compute_within_industry_group_returns,
+    neutralize_factor_by_exposure,
+)
+from factor_backtest.returns import return_label, return_slug, sort_return_labels
 
 LINE_FIGSIZE = (14, 6)
 BAR_FIGSIZE = (14, 6)
@@ -73,18 +84,39 @@ class CumulativeICSection(ReportSection):
     name = "cumulative_ic"
 
     def compute(self, context) -> SectionResult:
-        ic = context["daily_ic"]
-        tables = {"daily_ic": ic, "cumulative_ic": ic.cumsum(), "ic_stats": compute_ic_stats(ic)}
+        daily_ic_by_method = context.get("daily_ic_by_method") or {"spearman": context["daily_ic"]}
+        tables = {}
+        for method, ic in daily_ic_by_method.items():
+            tables[f"daily_ic_{method}"] = ic
+            tables[f"cumulative_ic_{method}"] = ic.cumsum()
+            tables[f"ic_stats_{method}"] = compute_ic_stats(ic)
+        if "spearman" in daily_ic_by_method:
+            tables["daily_ic"] = tables["daily_ic_spearman"]
+            tables["cumulative_ic"] = tables["cumulative_ic_spearman"]
+            tables["ic_stats"] = tables["ic_stats_spearman"]
+        elif daily_ic_by_method:
+            first_method = next(iter(daily_ic_by_method))
+            tables["daily_ic"] = tables[f"daily_ic_{first_method}"]
+            tables["cumulative_ic"] = tables[f"cumulative_ic_{first_method}"]
+            tables["ic_stats"] = tables[f"ic_stats_{first_method}"]
         return SectionResult(name=self.name, status="success", tables=tables)
 
     def render(self, context, result: SectionResult) -> SectionResult:
-        _plot_lines(
-            result.tables["cumulative_ic"],
-            context["plots_dir"] / "cumulative_ic.png",
-            "Cumulative RankIC",
-            result,
-            horizon_colors=context.get("horizon_colors"),
-        )
+        methods = _ic_methods_from_result(result, "cumulative_ic")
+        if not methods:
+            methods = list((context.get("daily_ic_by_method") or {"spearman": context.get("daily_ic")}).keys())
+        for method in methods:
+            table_name = f"cumulative_ic_{method}"
+            if table_name not in result.tables:
+                continue
+            title = f"Cumulative {_ic_method_label(method)}"
+            _plot_lines(
+                result.tables[table_name],
+                context["plots_dir"] / f"cumulative_ic_{method}.png",
+                title,
+                result,
+                horizon_colors=context.get("horizon_colors"),
+            )
         return result
 
 
@@ -92,19 +124,288 @@ class ICOverviewSection(ReportSection):
     name = "ic_overview"
 
     def compute(self, context) -> SectionResult:
-        ic = context["daily_ic"]
-        col = "ic_20d" if "ic_20d" in ic.columns else ic.columns[-1]
-        overview = ic[[col]].rolling(20, min_periods=1).mean()
-        return SectionResult(name=self.name, status="success", tables={"ic_overview": overview})
+        daily_ic_by_method = context.get("daily_ic_by_method") or {"spearman": context["daily_ic"]}
+        tables = {}
+        for method, ic in daily_ic_by_method.items():
+            tables[f"ic_overview_{method}"] = _ic_overview_table(ic)
+        if "spearman" in daily_ic_by_method:
+            tables["ic_overview"] = tables["ic_overview_spearman"]
+        elif daily_ic_by_method:
+            first_method = next(iter(daily_ic_by_method))
+            tables["ic_overview"] = tables[f"ic_overview_{first_method}"]
+        return SectionResult(name=self.name, status="success", tables=tables)
 
     def render(self, context, result: SectionResult) -> SectionResult:
-        _plot_lines(
-            result.tables["ic_overview"],
-            context["plots_dir"] / "ic_overview.png",
-            "20-Day Moving Average RankIC",
-            result,
-            horizon_colors=context.get("horizon_colors"),
+        methods = _ic_methods_from_result(result, "ic_overview")
+        if not methods:
+            methods = list((context.get("daily_ic_by_method") or {"spearman": context.get("daily_ic")}).keys())
+        for method in methods:
+            table_name = f"ic_overview_{method}"
+            if table_name not in result.tables:
+                continue
+            _plot_lines(
+                result.tables[table_name],
+                context["plots_dir"] / f"ic_overview_{method}.png",
+                f"20-Day Moving Average {_ic_method_label(method)}",
+                result,
+                horizon_colors=context.get("horizon_colors"),
+            )
+        return result
+
+
+def _ic_overview_table(ic: pd.DataFrame) -> pd.DataFrame:
+    cols = []
+    if "ic_20d" in ic.columns:
+        cols.append("ic_20d")
+    external_cols = [col for col in ic.columns if not re.fullmatch(r"ic_\d+d", str(col))]
+    cols.extend(col for col in external_cols if col not in cols)
+    if not cols:
+        cols = [ic.columns[-1]]
+    return ic[cols].rolling(20, min_periods=1).mean()
+
+
+def _ic_method_label(method: str) -> str:
+    if method == "spearman":
+        return "Spearman RankIC"
+    if method == "pearson":
+        return "Pearson IC"
+    return f"{method.title()} IC"
+
+
+def _ic_methods_from_result(result: SectionResult, table_prefix: str) -> list[str]:
+    methods = []
+    prefix = f"{table_prefix}_"
+    for table_name in result.tables:
+        if table_name.startswith(prefix):
+            method = table_name.removeprefix(prefix)
+            if method not in methods:
+                methods.append(method)
+    return methods
+
+
+class FactorStyleExposureSection(ReportSection):
+    name = "factor_style_exposure"
+
+    def compute(self, context) -> SectionResult:
+        risk_exposure = context.get("risk_exposure")
+        if risk_exposure is None:
+            return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
+        corr_by_method = compute_factor_style_exposure_corr(
+            context["factor"],
+            risk_exposure,
+            min_stocks=context.get("min_ic_stocks", 30),
+            methods=context.get("ic_methods", ["spearman"]),
         )
+        tables = {}
+        for method, corr in corr_by_method.items():
+            tables[f"factor_style_exposure_corr_{method}"] = corr
+            tables[f"factor_style_exposure_corr_summary_{method}"] = compute_exposure_corr_summary(corr)
+        return SectionResult(name=self.name, status="success", tables=tables)
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        prefix = "factor_style_exposure_corr_"
+        methods = [
+            table_name.removeprefix(prefix)
+            for table_name in result.tables
+            if table_name.startswith(prefix) and not table_name.startswith("factor_style_exposure_corr_summary_")
+        ]
+        for method in methods:
+            table_name = f"factor_style_exposure_corr_{method}"
+            if table_name not in result.tables:
+                continue
+            _plot_lines(
+                result.tables[table_name],
+                context["plots_dir"] / f"factor_style_exposure_corr_{method}.png",
+                f"Factor Style Exposure Correlation {method.title()}",
+                result,
+            )
+        return result
+
+
+class StyleNeutralizedICSection(ReportSection):
+    name = "style_neutralized_ic"
+
+    def compute(self, context) -> SectionResult:
+        risk_exposure = context.get("risk_exposure")
+        if risk_exposure is None:
+            return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
+        neutralized, warnings = neutralize_factor_by_exposure(
+            context["factor"],
+            risk_exposure,
+            include_styles=True,
+            include_industries=False,
+            min_stocks=context.get("min_ic_stocks", 30),
+        )
+        ic_by_method = compute_daily_ic(
+            neutralized,
+            context["future_returns"],
+            min_stocks=context.get("min_ic_stocks", 30),
+            methods=context.get("ic_methods", ["spearman"]),
+        )
+        tables = {"style_neutralized_factor": neutralized}
+        for method, ic in ic_by_method.items():
+            tables[f"style_neutralized_ic_{method}"] = ic
+            tables[f"cumulative_style_neutralized_ic_{method}"] = ic.cumsum()
+            tables[f"style_neutralized_ic_stats_{method}"] = compute_ic_stats(ic)
+        return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        for method in _ic_methods_from_result(result, "cumulative_style_neutralized_ic"):
+            table_name = f"cumulative_style_neutralized_ic_{method}"
+            if table_name not in result.tables:
+                continue
+            _plot_lines(
+                result.tables[table_name],
+                context["plots_dir"] / f"cumulative_style_neutralized_ic_{method}.png",
+                f"Cumulative Style Neutralized {_ic_method_label(method)}",
+                result,
+                horizon_colors=context.get("horizon_colors"),
+            )
+        return result
+
+
+class StyleIndustryNeutralizedICSection(ReportSection):
+    name = "style_industry_neutralized_ic"
+
+    def compute(self, context) -> SectionResult:
+        risk_exposure = context.get("risk_exposure")
+        if risk_exposure is None:
+            return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
+        neutralized, warnings = neutralize_factor_by_exposure(
+            context["factor"],
+            risk_exposure,
+            include_styles=True,
+            include_industries=True,
+            min_stocks=context.get("min_ic_stocks", 30),
+        )
+        ic_by_method = compute_daily_ic(
+            neutralized,
+            context["future_returns"],
+            min_stocks=context.get("min_ic_stocks", 30),
+            methods=context.get("ic_methods", ["spearman"]),
+        )
+        tables = {"style_industry_neutralized_factor": neutralized}
+        for method, ic in ic_by_method.items():
+            tables[f"style_industry_neutralized_ic_{method}"] = ic
+            tables[f"cumulative_style_industry_neutralized_ic_{method}"] = ic.cumsum()
+            tables[f"style_industry_neutralized_ic_stats_{method}"] = compute_ic_stats(ic)
+        return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        for method in _ic_methods_from_result(result, "cumulative_style_industry_neutralized_ic"):
+            table_name = f"cumulative_style_industry_neutralized_ic_{method}"
+            if table_name not in result.tables:
+                continue
+            _plot_lines(
+                result.tables[table_name],
+                context["plots_dir"] / f"cumulative_style_industry_neutralized_ic_{method}.png",
+                f"Cumulative Style + Industry Neutralized {_ic_method_label(method)}",
+                result,
+                horizon_colors=context.get("horizon_colors"),
+            )
+        return result
+
+
+class GroupExposureDiagnosticsSection(ReportSection):
+    name = "group_exposure_diagnostics"
+
+    def compute(self, context) -> SectionResult:
+        risk_exposure = context.get("risk_exposure")
+        if risk_exposure is None:
+            return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
+        diagnostics = compute_group_exposure_diagnostics(
+            context["factor"],
+            risk_exposure,
+            n_groups=10,
+            min_stocks=context.get("min_group_stocks", 10),
+        )
+        return SectionResult(
+            name=self.name,
+            status="success",
+            tables={
+                "group_style_exposure_daily": diagnostics["style_daily"],
+                "group_style_exposure_summary": diagnostics["style_summary"],
+                "group_industry_exposure_daily": diagnostics["industry_daily"],
+                "group_industry_exposure_summary": diagnostics["industry_summary"],
+            },
+        )
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        style_daily = result.tables.get("group_style_exposure_daily", pd.DataFrame())
+        industry_daily = result.tables.get("group_industry_exposure_daily", pd.DataFrame())
+        industry_label_rows = []
+        for leg in ["G1", "G10", "G10_minus_G1", "G1_minus_pool", "G10_minus_pool"]:
+            style_wide = _long_exposure_table_to_wide(style_daily, leg=leg)
+            if not style_wide.empty:
+                _plot_lines(
+                    style_wide,
+                    context["plots_dir"] / f"group_style_exposure_{_leg_slug(leg)}.png",
+                    f"Group Style Exposure {leg}",
+                    result,
+                    linewidth=1.3,
+                )
+            industry_wide = _long_exposure_table_to_wide(industry_daily, leg=leg)
+            if not industry_wide.empty:
+                industry_wide, label_map = _ascii_plot_columns(industry_wide, prefix="industry")
+                industry_label_rows.extend(label_map)
+                _plot_lines(
+                    industry_wide,
+                    context["plots_dir"] / f"group_industry_exposure_{_leg_slug(leg)}.png",
+                    f"Group Industry Exposure {leg}",
+                    result,
+                    linewidth=1.1,
+                )
+        if industry_label_rows:
+            label_table = pd.DataFrame(industry_label_rows).drop_duplicates().set_index("plot_label").sort_index()
+            result.tables["group_industry_exposure_plot_label_map"] = label_table
+        return result
+
+
+class GroupTurnoverSection(ReportSection):
+    name = "group_turnover"
+
+    def compute(self, context) -> SectionResult:
+        daily, summary, edge = compute_group_turnover(
+            context["factor"],
+            n_groups=10,
+            min_stocks=context.get("min_group_stocks", 10),
+        )
+        return SectionResult(
+            name=self.name,
+            status="success",
+            tables={
+                "daily_group_turnover": daily,
+                "group_turnover_summary": summary,
+                "group_turnover_edge_summary": edge,
+            },
+        )
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        daily = result.tables.get("daily_group_turnover", pd.DataFrame())
+        if not daily.empty:
+            _plot_lines(
+                daily,
+                context["plots_dir"] / "group_turnover.png",
+                "10-Group Turnover",
+                result,
+                colors=_group_colors(len(daily.columns)),
+                linewidth=1.4,
+                zero_line=False,
+            )
+            edge_cols = [col for col in ["G1", "G10"] if col in daily.columns]
+            if edge_cols:
+                edge_daily = daily.loc[:, edge_cols].copy()
+                if len(edge_cols) == 2:
+                    edge_daily["edge_avg"] = edge_daily[edge_cols].mean(axis=1)
+                _plot_lines(
+                    edge_daily,
+                    context["plots_dir"] / "group_turnover_edges.png",
+                    "G1 and G10 Turnover",
+                    result,
+                    linewidth=1.8,
+                    zero_line=False,
+                    ylim=(0, 1),
+                )
         return result
 
 
@@ -118,6 +419,7 @@ class GroupReturnSection(ReportSection):
         daily = result.tables["daily_group_returns"]
         if not daily.empty:
             summary = daily.groupby(["horizon", "group"])["group_return"].mean().unstack("horizon")
+            summary = summary.reindex(columns=sort_return_labels(summary.columns))
             result.tables["group_return_summary"] = summary
             _plot_bars(
                 summary,
@@ -126,14 +428,86 @@ class GroupReturnSection(ReportSection):
                 result,
                 horizon_colors=context.get("horizon_colors"),
             )
-            for horizon in sorted(daily.index.get_level_values("horizon").unique()):
-                cumulative = _group_cumulative_return_table(daily, int(horizon), plot_index=context.get("plot_index"))
-                table_name = f"group_cumulative_returns_{int(horizon)}d"
+            horizon_days_map = context.get("return_horizon_days", {})
+            for horizon in sort_return_labels(daily.index.get_level_values("horizon").unique()):
+                label = return_label(horizon)
+                horizon_days = horizon_days_map.get(label) or _infer_horizon_days(horizon)
+                if horizon_days is None:
+                    result.warnings.append(
+                        f"{label} has no horizon_days; skipped 10-group cumulative return plot to avoid misleading compounding"
+                    )
+                    continue
+                cumulative = _group_cumulative_return_table(
+                    daily,
+                    horizon,
+                    horizon_days=int(horizon_days),
+                    plot_index=context.get("plot_index"),
+                )
+                slug = return_slug(horizon)
+                table_name = f"group_cumulative_returns_{slug}"
                 result.tables[table_name] = cumulative
                 _plot_lines(
                     cumulative,
-                    context["plots_dir"] / f"group_cumulative_return_{int(horizon)}d.png",
-                    f"10-Group Cumulative Return {int(horizon)}D",
+                    context["plots_dir"] / f"group_cumulative_return_{slug}.png",
+                    f"10-Group Cumulative Return {label.upper()}",
+                    result,
+                    colors=_group_colors(len(cumulative.columns)),
+                    linewidth=1.8,
+                    zero_line=False,
+                )
+        return result
+
+
+class WithinIndustryGroupReturnSection(ReportSection):
+    name = "within_industry_group_return"
+
+    def compute(self, context) -> SectionResult:
+        risk_exposure = context.get("risk_exposure")
+        if risk_exposure is None:
+            return SectionResult(name=self.name, status="success", warnings=["risk exposure data is not configured"])
+        daily = compute_within_industry_group_returns(
+            context["factor"],
+            context["future_returns"],
+            risk_exposure,
+            n_groups=10,
+            min_industry_stocks=context.get("min_industry_ic_stocks", 10),
+        )
+        return SectionResult(name=self.name, status="success", tables={"within_industry_daily_group_returns": daily})
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        daily = result.tables["within_industry_daily_group_returns"]
+        if not daily.empty:
+            summary = daily.groupby(["horizon", "group"])["group_return"].mean().unstack("horizon")
+            summary = summary.reindex(columns=sort_return_labels(summary.columns))
+            result.tables["within_industry_group_return_summary"] = summary
+            _plot_bars(
+                summary,
+                context["plots_dir"] / "within_industry_group_return_bar.png",
+                "Within-Industry 10-Group Forward Returns",
+                result,
+                horizon_colors=context.get("horizon_colors"),
+            )
+            horizon_days_map = context.get("return_horizon_days", {})
+            for horizon in sort_return_labels(daily.index.get_level_values("horizon").unique()):
+                label = return_label(horizon)
+                horizon_days = horizon_days_map.get(label) or _infer_horizon_days(horizon)
+                if horizon_days is None:
+                    result.warnings.append(
+                        f"{label} has no horizon_days; skipped within-industry cumulative return plot"
+                    )
+                    continue
+                cumulative = _group_cumulative_return_table(
+                    daily,
+                    horizon,
+                    horizon_days=int(horizon_days),
+                    plot_index=context.get("plot_index"),
+                )
+                slug = return_slug(horizon)
+                result.tables[f"within_industry_group_cumulative_returns_{slug}"] = cumulative
+                _plot_lines(
+                    cumulative,
+                    context["plots_dir"] / f"within_industry_group_cumulative_return_{slug}.png",
+                    f"Within-Industry 10-Group Cumulative Return {label.upper()}",
                     result,
                     colors=_group_colors(len(cumulative.columns)),
                     linewidth=1.8,
@@ -163,7 +537,7 @@ class LayeredGroupReturnSection(ReportSection):
                         "window": window_name,
                         "window_size": int(window_size),
                         "end_date": max_date,
-                        "horizon": int(horizon),
+                        "horizon": horizon,
                         "group": int(group),
                         "group_return": float(value),
                     }
@@ -182,7 +556,7 @@ class LayeredGroupReturnSection(ReportSection):
         for window in summary.index.get_level_values("window").unique():
             window_data = summary[summary.index.get_level_values("window") == window]
             window_summary = window_data["group_return"].unstack("horizon")
-            window_summary = window_summary.sort_index().sort_index(axis=1)
+            window_summary = window_summary.sort_index().reindex(columns=sort_return_labels(window_summary.columns))
             _plot_bars(
                 window_summary,
                 context["plots_dir"] / f"group_return_bar_{window}.png",
@@ -231,9 +605,15 @@ DEFAULT_SECTIONS: list[ReportSection] = [
     DataQualitySection(),
     ICOverviewSection(),
     CumulativeICSection(),
+    FactorStyleExposureSection(),
+    StyleNeutralizedICSection(),
+    StyleIndustryNeutralizedICSection(),
+    GroupExposureDiagnosticsSection(),
     GroupReturnSection(),
+    WithinIndustryGroupReturnSection(),
     LayeredGroupReturnSection(),
     LongShortSection(),
+    GroupTurnoverSection(),
     PerformanceMetricsSection(),
 ]
 
@@ -322,7 +702,8 @@ def _colors_for_columns(columns, horizon_colors: dict[int, str] | None = None) -
 
 def _group_cumulative_return_table(
     daily_group_returns: pd.DataFrame,
-    horizon: int,
+    horizon,
+    horizon_days: int,
     plot_index: pd.Index | None = None,
 ) -> pd.DataFrame:
     horizon_data = daily_group_returns.xs(horizon, level="horizon")["group_return"]
@@ -330,8 +711,43 @@ def _group_cumulative_return_table(
     wide = wide.rename(columns={group: f"G{int(group)}" for group in wide.columns})
     if plot_index is not None:
         wide = wide.reindex(pd.DatetimeIndex(pd.to_datetime(plot_index)))
-    daily_equivalent = _horizon_return_to_daily_equivalent(wide, horizon)
+    daily_equivalent = _horizon_return_to_daily_equivalent(wide, horizon_days)
     return (1.0 + daily_equivalent.fillna(0.0)).cumprod()
+
+
+def _long_exposure_table_to_wide(daily: pd.DataFrame, *, leg: str) -> pd.DataFrame:
+    if daily.empty or not isinstance(daily.index, pd.MultiIndex) or "leg" not in daily.index.names:
+        return pd.DataFrame()
+    if leg not in daily.index.get_level_values("leg"):
+        return pd.DataFrame()
+    value = daily.xs(leg, level="leg")["value"]
+    exposure_level = value.index.names[-1]
+    wide = value.unstack(exposure_level).sort_index()
+    return wide
+
+
+def _leg_slug(leg: str) -> str:
+    return leg.lower().replace("_", "-").replace("-", "_")
+
+
+def _ascii_plot_columns(df: pd.DataFrame, *, prefix: str) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    renamed = df.copy()
+    used = set()
+    columns = []
+    rows = []
+    for idx, col in enumerate(df.columns, start=1):
+        text = str(col)
+        if text.isascii():
+            label = text
+        else:
+            label = f"{prefix}_{idx:02d}"
+        while label in used:
+            label = f"{prefix}_{idx:02d}_{len(used) + 1}"
+        used.add(label)
+        columns.append(label)
+        rows.append({"plot_label": label, "industry": text})
+    renamed.columns = columns
+    return renamed, rows
 
 
 def _horizon_return_to_daily_equivalent(returns: pd.DataFrame, horizon: int) -> pd.DataFrame:
@@ -339,6 +755,11 @@ def _horizon_return_to_daily_equivalent(returns: pd.DataFrame, horizon: int) -> 
         return returns
     valid = returns.where(returns > -1.0)
     return (1.0 + valid) ** (1.0 / horizon) - 1.0
+
+
+def _infer_horizon_days(value) -> int | None:
+    horizon = _extract_horizon(value)
+    return int(horizon) if horizon is not None else None
 
 
 def _group_colors(n: int) -> list[str]:

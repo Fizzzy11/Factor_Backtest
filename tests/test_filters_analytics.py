@@ -3,6 +3,7 @@ import pandas as pd
 
 from factor_backtest.analytics import (
     compute_daily_group_returns,
+    compute_daily_ic,
     compute_daily_rank_ic,
     compute_future_returns,
     compute_ic_stats,
@@ -78,6 +79,37 @@ def test_daily_rank_ic_group_returns_and_long_short_are_pool_local():
     assert ic.loc[dates[0], "ic_1d"] == 1.0
     assert groups.loc[(dates[0], 1, 1), "group_return"] < groups.loc[(dates[0], 1, 10), "group_return"]
     assert long_short.loc[dates[0], "long_short_1d"] > 0
+
+
+def test_compute_daily_ic_supports_spearman_and_pearson_outputs():
+    dates = pd.to_datetime(["2026-05-15"])
+    symbols = ["A", "B", "C", "D"]
+    factor = pd.DataFrame([[1.0, 2.0, 3.0, 100.0]], index=dates, columns=symbols)
+    future = pd.DataFrame([[1.0, 4.0, 9.0, 16.0]], index=dates, columns=symbols)
+
+    result = compute_daily_ic(
+        factor,
+        {"custom": future},
+        min_stocks=4,
+        methods=["spearman", "pearson"],
+    )
+
+    assert set(result) == {"spearman", "pearson"}
+    assert result["spearman"].loc[dates[0], "ic_custom"] == 1.0
+    assert result["pearson"].loc[dates[0], "ic_custom"] < 1.0
+
+
+def test_compute_daily_ic_rejects_unknown_methods():
+    dates = pd.to_datetime(["2026-05-15"])
+    factor = pd.DataFrame([[1.0, 2.0]], index=dates, columns=["A", "B"])
+    future = pd.DataFrame([[1.0, 2.0]], index=dates, columns=["A", "B"])
+
+    try:
+        compute_daily_ic(factor, {1: future}, min_stocks=2, methods=["kendall"])
+    except ValueError as exc:
+        assert "Unsupported IC methods" in str(exc)
+    else:
+        raise AssertionError("Expected unsupported IC method to raise ValueError")
 
 
 def test_quality_metrics_and_ic_stats():

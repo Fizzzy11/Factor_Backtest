@@ -22,12 +22,31 @@ def load_pool_mask(path: str | Path) -> pd.DataFrame:
     return mask.sort_index().sort_index(axis=1)
 
 
-def resolve_selected_pools(selected_pools: list[str] | None) -> dict[str, pd.DataFrame | None]:
+def resolve_selected_pools(
+    selected_pools: list[str] | None,
+    *,
+    pool_source: str = "csv",
+    pool_dir: str | Path | None = None,
+) -> dict[str, pd.DataFrame | None]:
     names = selected_pools or ["all"]
     out: dict[str, pd.DataFrame | None] = {}
     for name in names:
         if name not in POOL_REGISTRY:
             raise KeyError(f"Unknown pool: {name}")
         definition = POOL_REGISTRY[name]
-        out[name] = None if definition.is_virtual else load_pool_mask(definition.path)
+        if definition.is_virtual:
+            out[name] = None
+        elif pool_source == "csv":
+            out[name] = load_pool_mask(_resolve_pool_path(definition.path, pool_dir))
+        elif pool_source == "clickhouse":
+            raise NotImplementedError("ClickHouse pool membership loading is not implemented yet")
+        else:
+            raise ValueError(f"Unknown pool_source: {pool_source}")
     return out
+
+
+def _resolve_pool_path(path: str | Path, pool_dir: str | Path | None) -> Path:
+    resolved = Path(path)
+    if not resolved.is_absolute() and pool_dir is not None:
+        resolved = Path(pool_dir) / resolved
+    return resolved

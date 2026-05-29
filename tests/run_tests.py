@@ -10,6 +10,7 @@ from pathlib import Path
 TEST_MODULES = [
     "tests.test_config",
     "tests.test_factor_loader",
+    "tests.test_external_returns",
     "tests.test_calendar_pools_market_data",
     "tests.test_filters_analytics",
     "tests.test_runner_sections",
