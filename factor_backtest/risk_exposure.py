@@ -110,6 +110,23 @@ def load_risk_exposure_from_csv(
     return dataframe_to_risk_exposure(raw, style_columns=style_columns, ignored_columns=ignored_columns)
 
 
+def load_risk_exposure_from_file(
+    path: str | Path,
+    *,
+    style_columns: Iterable[str] = DEFAULT_STYLE_COLUMNS,
+    ignored_columns: Iterable[str] = IGNORED_EXPOSURE_COLUMNS,
+) -> RiskExposureData:
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        raw = pd.read_parquet(path)
+    elif suffix == ".csv":
+        raw = pd.read_csv(path)
+    else:
+        raise ValueError(f"Unsupported risk exposure file type: {path.suffix}")
+    return dataframe_to_risk_exposure(raw, style_columns=style_columns, ignored_columns=ignored_columns)
+
+
 def resolve_risk_exposure(config: BacktestConfig) -> RiskExposureData | None:
     source = config.data_sources.risk_exposure_source
     if source == "none":
@@ -118,7 +135,7 @@ def resolve_risk_exposure(config: BacktestConfig) -> RiskExposureData | None:
         path = Path(config.paths.risk_exposure_path)
         if not path.is_absolute():
             path = Path(config.paths.data_root) / path
-        return load_risk_exposure_from_csv(path)
+        return load_risk_exposure_from_file(path)
     if source == "clickhouse":
         return load_risk_exposure_from_clickhouse(config=config.data_sources)
     raise ValueError(f"Unknown risk_exposure_source: {source}")

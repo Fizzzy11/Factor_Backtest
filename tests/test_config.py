@@ -9,6 +9,7 @@ def test_backtest_config_defaults_match_design():
     assert cfg.paths.project_dir == Path("/app/workspace/zhangyuan/Factor_Backtest")
     assert cfg.paths.data_root == Path("/data/zhangyuan")
     assert cfg.paths.pool_dir == Path("/data/zhangyuan/pool")
+    assert cfg.paths.risk_exposure_path == Path("risk&industry/CNE5_Industry_daily.parquet")
     assert cfg.output_root == Path("/data/zhangyuan/Factor_Backtest_Result")
     assert cfg.selected_pools == ["all"]
     assert cfg.framework_version == "v1"
@@ -34,10 +35,10 @@ def test_backtest_config_defaults_match_design():
 
 
 def test_path_config_normalizes_string_paths():
-    cfg = BacktestConfig(paths=PathConfig(data_root="/tmp/data", risk_exposure_path="risk&industry/CNE5&Industry.csv"))
+    cfg = BacktestConfig(paths=PathConfig(data_root="/tmp/data", risk_exposure_path="risk&industry/CNE5_Industry_daily.parquet"))
 
     assert cfg.paths.data_root == Path("/tmp/data")
-    assert cfg.paths.risk_exposure_path == Path("risk&industry/CNE5&Industry.csv")
+    assert cfg.paths.risk_exposure_path == Path("risk&industry/CNE5_Industry_daily.parquet")
     assert cfg.output_root == Path("/tmp/data") / "Factor_Backtest_Result"
 
 

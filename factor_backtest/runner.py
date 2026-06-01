@@ -829,9 +829,7 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
                 continue
             label = plot_name.removeprefix("group_cumulative_return_").removesuffix(".png")
             extra_group_plots.append(("group_return", plot_name, f"10-Group Cumulative Return {label.upper()}"))
-    plot_order = [
-        *ic_plot_order,
-        *overview_plot_order,
+    diagnostic_plot_order = [
         (
             "factor_style_exposure",
             "factor_style_exposure_corr_spearman.png",
@@ -876,9 +874,6 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
             "group_industry_exposure_g10_minus_g1.png",
             "Group Industry Exposure G10 - G1",
         ),
-        *builtin_group_plots,
-        *extra_group_plots,
-        ("group_return", "group_return_bar.png", "10-Group Forward Returns"),
         (
             "within_industry_group_return",
             "within_industry_group_return_bar.png",
@@ -904,15 +899,23 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
             "within_industry_group_cumulative_return_20d.png",
             "Within-Industry 10-Group Cumulative Return 20D",
         ),
+        ("group_turnover", "group_turnover_edges.png", "G1 and G10 Turnover"),
+        ("group_turnover", "group_turnover.png", "10-Group Turnover"),
+    ]
+    plot_order = [
+        *ic_plot_order,
+        *overview_plot_order,
+        *builtin_group_plots,
+        *extra_group_plots,
+        ("group_return", "group_return_bar.png", "10-Group Forward Returns"),
         ("layered_group_return", "group_return_bar_6m.png", "10-Group Forward Returns 6M"),
         ("layered_group_return", "group_return_bar_1y.png", "10-Group Forward Returns 1Y"),
         ("layered_group_return", "group_return_bar_3y.png", "10-Group Forward Returns 3Y"),
         ("layered_group_return", "group_return_bar_5y.png", "10-Group Forward Returns 5Y"),
         ("long_short", "long_short_curve.png", "Cumulative Long-Short Return"),
-        ("group_turnover", "group_turnover_edges.png", "G1 and G10 Turnover"),
-        ("group_turnover", "group_turnover.png", "10-Group Turnover"),
         ("data_quality", "data_quality_counts.png", "Factor Coverage Counts"),
         ("data_quality", "data_quality_ratios.png", "Factor Coverage and Invalid Value Ratios"),
+        *diagnostic_plot_order,
     ]
     cards = []
     for section_name, plot_name, title in plot_order:

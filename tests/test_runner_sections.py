@@ -322,11 +322,15 @@ def test_runner_renders_risk_exposure_sections_when_csv_source_is_configured():
                 row["银行"] = 1 if i < 12 else 0
                 row["计算机"] = 1 if i >= 12 else 0
                 risk_rows.append(row)
-        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path = tmp_path / "risk&industry" / "risk_exposure.csv"
         risk_path.parent.mkdir()
         pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
         cfg = BacktestConfig(
-            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            paths=PathConfig(
+                data_root=tmp_path,
+                pool_dir=tmp_path / "pool",
+                risk_exposure_path=risk_path.relative_to(tmp_path),
+            ),
             data_sources=DataSourceConfig(risk_exposure_source="csv"),
             output_root=tmp_path / "out",
             selected_pools=["all"],
@@ -396,11 +400,15 @@ def test_runner_can_write_neutralized_factor_tables_when_enabled():
                     row[style] = float(i + day)
                 row["industry"] = "801760.INDX" if i < 12 else "801780.INDX"
                 risk_rows.append(row)
-        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path = tmp_path / "risk&industry" / "risk_exposure.csv"
         risk_path.parent.mkdir()
         pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
         cfg = BacktestConfig(
-            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            paths=PathConfig(
+                data_root=tmp_path,
+                pool_dir=tmp_path / "pool",
+                risk_exposure_path=risk_path.relative_to(tmp_path),
+            ),
             data_sources=DataSourceConfig(risk_exposure_source="csv"),
             output_root=tmp_path / "out",
             selected_pools=["all"],
@@ -447,11 +455,15 @@ def test_runner_risk_sections_accept_single_industry_code_column():
                 row["comovement"] = 1.0
                 row["industry"] = "801760.INDX" if i < 20 else "801780.INDX"
                 risk_rows.append(row)
-        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path = tmp_path / "risk&industry" / "risk_exposure.csv"
         risk_path.parent.mkdir()
         pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
         cfg = BacktestConfig(
-            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            paths=PathConfig(
+                data_root=tmp_path,
+                pool_dir=tmp_path / "pool",
+                risk_exposure_path=risk_path.relative_to(tmp_path),
+            ),
             data_sources=DataSourceConfig(risk_exposure_source="csv"),
             output_root=tmp_path / "out",
             selected_pools=["all"],
@@ -518,11 +530,15 @@ def test_group_exposure_and_turnover_sections_render_edge_group_outputs():
                 row["bank"] = 1 if i < 20 else 0
                 row["tech"] = 1 if i >= 20 else 0
                 risk_rows.append(row)
-        risk_path = tmp_path / "risk&industry" / "CNE5&Industry.csv"
+        risk_path = tmp_path / "risk&industry" / "risk_exposure.csv"
         risk_path.parent.mkdir()
         pd.DataFrame(risk_rows).to_csv(risk_path, index=False)
         cfg = BacktestConfig(
-            paths=PathConfig(data_root=tmp_path, pool_dir=tmp_path / "pool"),
+            paths=PathConfig(
+                data_root=tmp_path,
+                pool_dir=tmp_path / "pool",
+                risk_exposure_path=risk_path.relative_to(tmp_path),
+            ),
             data_sources=DataSourceConfig(risk_exposure_source="csv"),
             output_root=tmp_path / "out",
             selected_pools=["all"],
@@ -1121,16 +1137,24 @@ def test_html_report_orders_key_plots_by_analysis_flow():
         plot_specs = [
             ("ic_overview", "ic_overview.png"),
             ("cumulative_ic", "cumulative_ic.png"),
+            ("factor_style_exposure", "factor_style_exposure_corr_spearman.png"),
+            ("style_neutralized_ic", "cumulative_style_neutralized_ic_spearman.png"),
+            ("style_industry_neutralized_ic", "cumulative_style_industry_neutralized_ic_spearman.png"),
+            ("group_exposure_diagnostics", "group_style_exposure_g1.png"),
+            ("group_exposure_diagnostics", "group_industry_exposure_g10_minus_g1.png"),
             ("group_return", "group_cumulative_return_1d.png"),
             ("group_return", "group_cumulative_return_5d.png"),
             ("group_return", "group_cumulative_return_10d.png"),
             ("group_return", "group_cumulative_return_20d.png"),
             ("group_return", "group_return_bar.png"),
+            ("within_industry_group_return", "within_industry_group_return_bar.png"),
+            ("within_industry_group_return", "within_industry_group_cumulative_return_1d.png"),
             ("layered_group_return", "group_return_bar_6m.png"),
             ("layered_group_return", "group_return_bar_1y.png"),
             ("layered_group_return", "group_return_bar_3y.png"),
             ("layered_group_return", "group_return_bar_5y.png"),
             ("long_short", "long_short_curve.png"),
+            ("group_turnover", "group_turnover_edges.png"),
             ("data_quality", "data_quality_counts.png"),
             ("data_quality", "data_quality_ratios.png"),
         ]
@@ -1161,6 +1185,14 @@ def test_html_report_orders_key_plots_by_analysis_flow():
             "Cumulative Long-Short Return",
             "Factor Coverage Counts",
             "Factor Coverage and Invalid Value Ratios",
+            "Factor Style Exposure Correlation Spearman",
+            "Cumulative Style Neutralized Spearman RankIC",
+            "Cumulative Style + Industry Neutralized Spearman RankIC",
+            "Group Style Exposure G1",
+            "Group Industry Exposure G10 - G1",
+            "Within-Industry 10-Group Forward Returns",
+            "Within-Industry 10-Group Cumulative Return 1D",
+            "G1 and G10 Turnover",
         ]
         positions = [html.index(title) for title in expected_titles]
         assert positions == sorted(positions)

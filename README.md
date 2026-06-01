@@ -2,7 +2,7 @@
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目发布版本为 `2.1.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目发布版本为 `2.1.1`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -359,7 +359,7 @@ Spearman 衡量因子排序和未来收益排序的相关性，适合默认的�
 如需检查因子和 Barra10 风格暴露的关系，或计算风格/行业中性化 IC，可以把风险暴露和行业数据放在：
 
 ```text
-/data/zhangyuan/risk&industry/CNE5&Industry.csv
+/data/zhangyuan/risk&industry/CNE5_Industry_daily.parquet
 ```
 
 配置：
@@ -370,7 +370,7 @@ from factor_backtest.config import BacktestConfig, DataSourceConfig, PathConfig
 cfg = BacktestConfig(
     paths=PathConfig(
         data_root="/data/zhangyuan",
-        risk_exposure_path="risk&industry/CNE5&Industry.csv",
+        risk_exposure_path="risk&industry/CNE5_Industry_daily.parquet",
     ),
     data_sources=DataSourceConfig(
         risk_exposure_source="csv",
@@ -381,7 +381,7 @@ cfg = BacktestConfig(
 )
 ```
 
-CSV 需要包含 `date`/`trade_date`、`symbol`、Barra10 风格暴露和行业信息。行业信息支持两种格式：
+本地风险暴露文件支持 `.parquet` 和 `.csv`，默认 parquet 读取依赖 `pyarrow`。文件需要包含 `date`/`trade_date`、`symbol`、Barra10 风格暴露和行业信息。行业信息支持两种格式：
 
 - 单列 `industry`：每个 `date-symbol` 一个行业名或行业码，例如 `0..30` 或 `801760.INDX`。这是推荐格式；框架会在需要行业回归或行业暴露时生成内部 dummy，并在 `within_industry_group_return` 中优先使用 compact industry code 快路径。
 - 多列 one-hot 行业 dummy：每个行业一列，属于该行业为 1，否则为 0。
@@ -450,7 +450,7 @@ verbose = False
 & 'C:\Users\fizzz\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m pytest tests -q
 ```
 
-如果当前环境没有 `pytest`，可以使用标准库测试入口：
+兼容入口 `tests/run_tests.py` 也会委托给 pytest，避免旧的手写测试器漏跑或误报：
 
 ```powershell
 & 'C:\Users\fizzz\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' tests\run_tests.py
@@ -529,7 +529,7 @@ result = run_factor_backtest(
 
 ## 取数配置集中化
 
-可变取数配置集中在 `factor_backtest.config`。当前行情、ST、停牌等可通过 ClickHouse 获取；pool 暂时仍使用 CSV；因子值长期保留文件和数据库双入口的设计空间；风格暴露和行业数据当前通过 CSV 读取，并预留 ClickHouse 切换入口。
+可变取数配置集中在 `factor_backtest.config`。当前行情、ST、停牌等可通过 ClickHouse 获取；pool 暂时仍使用 CSV；因子值长期保留文件和数据库双入口的设计空间；风格暴露和行业数据当前通过本地 parquet/csv 文件读取，并预留 ClickHouse 切换入口。
 
 ```python
 from factor_backtest import BacktestConfig
@@ -540,7 +540,7 @@ cfg = BacktestConfig(
         project_dir="/app/workspace/zhangyuan/Factor_Backtest",
         data_root="/data/zhangyuan",
         pool_dir="/data/zhangyuan/pool",
-        risk_exposure_path="risk&industry/CNE5&Industry.csv",
+        risk_exposure_path="risk&industry/CNE5_Industry_daily.parquet",
     ),
     data_sources=DataSourceConfig(
         market_data_source="clickhouse",

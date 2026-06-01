@@ -18,6 +18,7 @@ from factor_backtest.risk_exposure import (
     DEFAULT_STYLE_COLUMNS,
     dataframe_to_risk_exposure,
     load_risk_exposure_from_csv,
+    load_risk_exposure_from_file,
 )
 
 
@@ -44,7 +45,7 @@ def _risk_raw() -> pd.DataFrame:
 
 
 def test_risk_exposure_loader_ignores_comovement_and_tracks_daily_industry(tmp_path):
-    path = tmp_path / "CNE5&Industry.csv"
+    path = tmp_path / "risk_exposure.csv"
     _risk_raw().to_csv(path, index=False)
 
     data = load_risk_exposure_from_csv(path)
@@ -59,6 +60,21 @@ def test_risk_exposure_loader_ignores_comovement_and_tracks_daily_industry(tmp_p
     assert second_day.loc["S000", "银行"] == 0
     assert second_day.loc["S000", "计算机"] == 1
     assert second_day.loc["S001", ["银行", "计算机"]].sum() == 2
+
+
+def test_risk_exposure_file_loader_accepts_parquet_path(monkeypatch, tmp_path):
+    path = tmp_path / "CNE5_Industry_daily.parquet"
+
+    def fake_read_parquet(read_path):
+        assert read_path == path
+        return _risk_raw()
+
+    monkeypatch.setattr(pd, "read_parquet", fake_read_parquet)
+
+    data = load_risk_exposure_from_file(path)
+
+    assert data.style_columns == DEFAULT_STYLE_COLUMNS
+    assert len(data.industry_columns) == 2
 
 
 def test_risk_exposure_loader_accepts_date_index_dataframe():

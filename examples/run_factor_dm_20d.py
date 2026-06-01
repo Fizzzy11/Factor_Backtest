@@ -49,10 +49,10 @@ def main() -> None:
     verbose = True
 
     # ===== 7. Risk exposure and industry data =====
-    # Default uses the configured CSV. Set to "none" if the file is unavailable.
-    # /data/zhangyuan/risk&industry/CNE5&Industry.csv
+    # Default uses the configured local parquet/csv file. Set to "none" if the file is unavailable.
+    # /data/zhangyuan/risk&industry/CNE5_Industry_daily.parquet
     risk_exposure_source = "csv"
-    risk_exposure_path = "risk&industry/CNE5&Industry.csv"
+    risk_exposure_path = "risk&industry/CNE5_Industry_daily.parquet"
     # Used by within_industry_group_return.
     min_industry_ic_stocks = 10
 

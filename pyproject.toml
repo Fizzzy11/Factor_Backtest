@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "factor-backtest"
-version = "2.1.0"
+version = "2.1.1"
 description = "Factor ranking backtest framework"
 requires-python = ">=3.10"
 dependencies = [
   "matplotlib",
   "numpy",
   "pandas",
+  "pyarrow",
 ]
 
 [tool.pytest.ini_options]

@@ -18,7 +18,7 @@ class PathConfig:
     project_dir: Path = Path("/app/workspace/zhangyuan/Factor_Backtest")
     data_root: Path = Path("/data/zhangyuan")
     pool_dir: Path = Path("/data/zhangyuan/pool")
-    risk_exposure_path: Path = Path("risk&industry/CNE5&Industry.csv")
+    risk_exposure_path: Path = Path("risk&industry/CNE5_Industry_daily.parquet")
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "project_dir", Path(self.project_dir))
