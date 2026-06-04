@@ -190,7 +190,13 @@ def dataframe_to_risk_exposure(
 
 
 def _standardize_risk_exposure_dataframe(raw: pd.DataFrame) -> pd.DataFrame:
-    if raw.index.name in DATE_COLUMNS and not any(col in raw.columns for col in DATE_COLUMNS):
+    index_names = set(name for name in getattr(raw.index, "names", []) if name is not None)
+    has_named_index_key = bool(index_names.intersection({*DATE_COLUMNS, "symbol"}))
+    columns = set(raw.columns)
+    has_date_column = any(col in columns for col in DATE_COLUMNS)
+    if has_named_index_key and ("symbol" not in columns or not has_date_column):
+        df = raw.reset_index()
+    elif raw.index.name in DATE_COLUMNS and not any(col in raw.columns for col in DATE_COLUMNS):
         df = raw.reset_index()
     else:
         df = raw.copy()

@@ -85,6 +85,15 @@ def test_risk_exposure_loader_accepts_date_index_dataframe():
     assert data.slice_date(pd.Timestamp("2026-01-02"), ["S000"]).loc["S000", "银行"] == 1
 
 
+def test_risk_exposure_loader_accepts_date_symbol_multiindex_dataframe():
+    raw = _risk_raw().set_index(["date", "symbol"])
+
+    data = dataframe_to_risk_exposure(raw)
+
+    assert data.exposures.index.names == ["trade_date", "symbol"]
+    assert data.slice_date(pd.Timestamp("2026-01-02"), ["S000"]).index.tolist() == ["S000"]
+
+
 def test_risk_exposure_loader_accepts_single_industry_column_and_expands_to_dummies():
     raw = _risk_raw()
     industry_names = ["银行", "计算机"]
