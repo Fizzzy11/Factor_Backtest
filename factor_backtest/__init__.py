@@ -11,7 +11,7 @@ from factor_backtest.runner import (
     run_factor_backtest_minimal,
 )
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 
 __all__ = [
     "BacktestConfig",
