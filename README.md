@@ -1,8 +1,8 @@
-# 因子排序回测框架 v2.0
+# 因子排序回测框架 v2.2.0
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目发布版本为 `2.1.2`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目发布版本为 `2.2.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -11,6 +11,23 @@
 ```
 
 这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 GitHub Release 或 Python 包版本。
+
+## v2.2.0 更新内容
+
+`v2.2.0` 新增公司平台 handoff 交付包导出流程，用于回答“本地单因子文件是否能被 Factor_Backtest 跑出真实、非空、机器可读、可复现的 `sample_latest/`”这个第一轮验收问题。该流程默认关闭，不影响常规 `latest/`、`runs/<timestamp>/` 和 HTML 报告输出。
+
+本次更新包括：
+
+- 新增 `HandoffConfig`，通过 `BacktestConfig(handoff=HandoffConfig(enabled=True))` 打开平台交付导出。
+- 新增 handoff 导出器，真实回测结束后额外生成 `docs/handoffs/factor_backtest_platform/sample_latest/`。
+- 自动整理平台验收要求的 `run_meta.json`、`run_log.json`、5 张核心 CSV 和 4 个 diagnostics JSON。
+- 5 张核心 CSV 包括 `ic_stats_spearman.csv`、`group_return_summary.csv`、`performance_metrics.csv`、`group_turnover_edge_summary.csv` 和 `data_quality.csv`。
+- 导出前会校验核心 CSV 存在且非空，并额外校验 `ic_stats_spearman.csv` 覆盖当前 `horizons` 对应的 IC 统计。
+- 四类 diagnostics 第一轮默认写为 `pending(company)`，明确 reason、owner、required_input 和 next_step，不伪造 computed 指标。
+- `examples/run_factor_dm_20d.py` 增加 handoff 开关示例，默认关闭；需要平台验收时只需设置 `handoff_enabled=True`。
+- 新增 `tests/test_handoff.py` 覆盖默认关闭、成功导出和缺失 IC horizon 报错场景。
+
+推荐第一轮 handoff 使用最小 section 集合，只跑 `all` 股票池、Spearman IC、基础分组收益、换手率、绩效和数据质量；如果不需要风格/行业输出，可设置 `risk_exposure_source="none"`，避免风险暴露数据缺失影响交付闭环。
 
 ## 核心时间语义
 
@@ -223,6 +240,34 @@ enabled_sections = "all"
 - `performance_metrics`
 
 每个模块独立计算和渲染。一个模块失败只会写入 `run_log.json`，不会中断其他模块。
+
+## 平台 handoff 交付包
+
+如果需要按公司平台验收任务书生成 `docs/handoffs/factor_backtest_platform/sample_latest/`，可以打开 handoff 开关。它不会改变正常 `latest/` 输出，只会在真实回测完成后额外整理 5 张核心 CSV、`run_meta.json`、`run_log.json` 和 4 个 pending diagnostics JSON。
+
+```python
+from factor_backtest import BacktestConfig, HandoffConfig
+from factor_backtest.config import DataSourceConfig
+
+cfg = BacktestConfig(
+    factor_name="smoke_factor_v1",
+    selected_pools=["all"],
+    horizons=[1, 5, 10, 20],
+    ic_methods=["spearman"],
+    data_sources=DataSourceConfig(risk_exposure_source="none"),
+    enabled_sections=[
+        "data_quality",
+        "cumulative_ic",
+        "group_return",
+        "long_short",
+        "group_turnover",
+        "performance_metrics",
+    ],
+    handoff=HandoffConfig(enabled=True, data_asof="2026-06-10"),
+)
+```
+
+导出器会校验 `ic_stats_spearman.csv`、`group_return_summary.csv`、`performance_metrics.csv`、`group_turnover_edge_summary.csv` 和 `data_quality.csv` 是否存在且非空；缺表或空表会报错，不会生成伪造指标。详细字段和验收口径见 [使用手册](docs/使用手册.md)。
 
 ## 输出结构
 

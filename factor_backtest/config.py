@@ -57,6 +57,24 @@ class DataSourceConfig:
 
 
 @dataclass(frozen=True)
+class HandoffConfig:
+    enabled: bool = False
+    target: Literal["factor_backtest_platform"] = "factor_backtest_platform"
+    output_dir: Path = Path("docs/handoffs/factor_backtest_platform")
+    pool: str = "all"
+    factor_direction: str = "high_is_long"
+    entry: str = "next_open"
+    data_asof: str | None = None
+    data_access_provider: str = "legacy_clickhouse_adapter"
+    data_access_mapping_version: str = "pending(it)"
+    data_access_namespace: str | None = None
+    data_access_logical_fields: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "output_dir", Path(self.output_dir))
+
+
+@dataclass(frozen=True)
 class PoolDefinition:
     path: Path | None
     display_name: str
@@ -110,6 +128,7 @@ class BacktestConfig:
     output_layout: Literal["latest_runs", "timestamp"] = "latest_runs"
     render_plots: bool = True
     write_neutralized_factors: bool = False
+    handoff: HandoffConfig = field(default_factory=HandoffConfig)
     verbose: bool = True
 
     def __post_init__(self) -> None:

@@ -1,6 +1,6 @@
 """Factor ranking backtest framework."""
 
-from factor_backtest.config import BacktestConfig, ClickHouseConfig, ClickHouseTableConfig, DataSourceConfig
+from factor_backtest.config import BacktestConfig, ClickHouseConfig, ClickHouseTableConfig, DataSourceConfig, HandoffConfig
 from factor_backtest.result_loader import LoadedBacktestResult, load_backtest_result
 from factor_backtest.risk_exposure import RiskExposureData, RiskExposurePanel, load_risk_exposure_from_csv, resolve_risk_exposure
 from factor_backtest.returns import ReturnSpec, normalize_external_returns, normalize_return_dataframe
@@ -11,13 +11,14 @@ from factor_backtest.runner import (
     run_factor_backtest_minimal,
 )
 
-__version__ = "2.1.2"
+__version__ = "2.2.0"
 
 __all__ = [
     "BacktestConfig",
     "ClickHouseConfig",
     "ClickHouseTableConfig",
     "DataSourceConfig",
+    "HandoffConfig",
     "LoadedBacktestResult",
     "RiskExposureData",
     "RiskExposurePanel",

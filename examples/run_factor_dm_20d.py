@@ -1,5 +1,5 @@
 from factor_backtest.clickhouse_adapter import load_market_data_from_clickhouse
-from factor_backtest.config import BacktestConfig, DataSourceConfig, PathConfig
+from factor_backtest.config import BacktestConfig, DataSourceConfig, HandoffConfig, PathConfig
 from factor_backtest.factor_loader import load_factor_file, resolve_factor_path
 from factor_backtest.runner import run_factor_backtest
 
@@ -69,6 +69,26 @@ def main() -> None:
     # with render_factor_backtest_report(result.latest_dir).
     render_plots = True
 
+    # ===== 9. Platform handoff parameters =====
+    # Default is off. Set handoff_enabled=True only when you need to export
+    # docs/handoffs/factor_backtest_platform/sample_latest/ for platform acceptance.
+    # For first-round handoff only, a faster and safer setup is:
+    # selected_pools = ["all"]
+    # ic_methods = ["spearman"]
+    # risk_exposure_source = "none"
+    # enabled_sections = [
+    #     "data_quality",
+    #     "cumulative_ic",
+    #     "group_return",
+    #     "long_short",
+    #     "group_turnover",
+    #     "performance_metrics",
+    # ]
+    handoff_enabled = False
+    handoff_factor_direction = "high_is_long"
+    # If None, handoff data_asof uses the max date in factor_df.index.
+    handoff_data_asof = None
+
     resolved_factor_path = factor_path or resolve_factor_path(
         data_root=data_root,
         factor_name=factor_name_for_path,
@@ -109,6 +129,11 @@ def main() -> None:
         output_layout=output_layout,
         artifact_level=artifact_level,
         render_plots=render_plots,
+        handoff=HandoffConfig(
+            enabled=handoff_enabled,
+            factor_direction=handoff_factor_direction,
+            data_asof=handoff_data_asof,
+        ),
         verbose=verbose,
     )
 
@@ -119,6 +144,8 @@ def main() -> None:
     )
     print(result.run_dir)
     print(result.latest_dir)
+    if result.handoff_dir is not None:
+        print(result.handoff_dir)
 
 
 if __name__ == "__main__":

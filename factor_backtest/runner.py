@@ -23,6 +23,7 @@ from factor_backtest.analytics import (
 )
 from factor_backtest.config import BacktestConfig
 from factor_backtest.filters import compute_tradability_mask
+from factor_backtest.handoff import export_factor_backtest_platform_handoff
 from factor_backtest.io import ensure_dir, read_json, read_table, write_json, write_table
 from factor_backtest.io import format_table_float
 from factor_backtest.market_data import MarketDataBundle
@@ -54,6 +55,7 @@ class BacktestRunResult:
     latest_dir: Path | None
     section_status: dict[str, dict[str, SectionResult]]
     warnings: list[str]
+    handoff_dir: Path | None = None
 
 
 def run_factor_backtest(
@@ -278,8 +280,23 @@ def run_factor_backtest(
     _write_html_report(run_dir, status, meta=run_meta, warnings=run_warnings)
     if latest_dir is not None:
         _sync_latest_dir(run_dir, latest_dir)
+    handoff_dir = None
+    if cfg.handoff.enabled:
+        _log(cfg, log_fn, f"[v1] exporting handoff package: {cfg.handoff.target}")
+        handoff_dir = export_factor_backtest_platform_handoff(
+            run_dir=run_dir,
+            config=cfg,
+            factor_name=resolved_factor_name,
+            factor_index=factor.index,
+        )
     _log(cfg, log_fn, f"[v1] completed: {run_dir}")
-    return BacktestRunResult(run_dir=run_dir, latest_dir=latest_dir, section_status=status, warnings=run_warnings)
+    return BacktestRunResult(
+        run_dir=run_dir,
+        latest_dir=latest_dir,
+        section_status=status,
+        warnings=run_warnings,
+        handoff_dir=handoff_dir,
+    )
 
 
 def run_factor_backtest_minimal(
