@@ -1,8 +1,8 @@
-# 因子排序回测框架 v2.2.0
+# 因子排序回测框架 v2.2.1
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目发布版本为 `2.2.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目发布版本为 `2.2.1`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -11,6 +11,22 @@
 ```
 
 这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 GitHub Release 或 Python 包版本。
+
+## v2.2.1 更新内容
+
+`v2.2.1` 是小版本优化，重点补齐公司侧正式 diagnostics 输出流程。该流程由 `CompanyDiagnosticsConfig` 控制，默认关闭；打开后会在真实回测结果目录下生成 `spanning.json`、`crowding.json`、`mechanism_consistency.json` 和 `diversity.json`，并同时保留在 `runs/<timestamp>/diagnostics/` 与 `latest/diagnostics/`。
+
+本次更新包括：
+- 新增正式 `CompanyDiagnosticsConfig`，与第一轮 `HandoffConfig` 验收样例包分离。
+- 新增 `factor_backtest/company_diagnostics.py`，支持 production book、peer book 和 regime 宽表输入。
+- `spanning.json` 支持基于 production book 的迭代 top-k 残差化，并输出 `incremental_ic` 与 `incremental_r2`。
+- `crowding.json` 按 pool 输出 peer 相似度、TopK overlap 和拥挤度指标。
+- `diversity.json` 基于 `all` pool 输出相对 peer book 的新颖度。
+- `mechanism_consistency.json` 按 pool 和 horizon 输出分组单调性，并可在 regime 标签内计算 IC。
+- 正式 diagnostics 只写 `status="computed"`；没有足够输入或无法计算的文件不会生成。
+- 正式 diagnostics 遵守公司侧固定 key：pool 只保留 `all`、`hs300_pool`、`zz1000_pool`、`zz2000_pool`，horizon 只保留 `"1"`、`"5"`、`"10"`、`"20"`。
+- `examples/run_factor_dm_20d.py` 增加 `company_diagnostics_enabled` 开关和完整参数示例。
+- README 和使用手册补充正式 diagnostics 的输出路径、输入格式、参数说明和预留项说明。
 
 ## v2.2.0 更新内容
 
@@ -620,3 +636,106 @@ market_data = load_market_data_from_clickhouse(
     config=cfg.data_sources,
 )
 ```
+## Company Diagnostics 正式诊断 JSON
+
+`CompanyDiagnosticsConfig` 用于生成正式的公司侧诊断结果，默认关闭。它和 `HandoffConfig` 的第一轮 `pending(company)` 占位文件不是同一个流程：handoff 只整理验收样本；company diagnostics 会在真实回测结果目录内写入 `status="computed"` 的 JSON。
+
+输出位置：
+
+```text
+<output_root>/<factor_name>/runs/<run_time>/diagnostics/
+<output_root>/<factor_name>/latest/diagnostics/
+```
+
+目前支持四类文件；某类诊断没有足够输入时不会写该文件，不会写 pending 或空占位：
+
+```text
+spanning.json
+crowding.json
+mechanism_consistency.json
+diversity.json
+```
+
+输入数据接口：
+
+```text
+production_book: date/trade_date, symbol/stock_id, factor_id, value/factor_value
+peer_book:       date/trade_date, symbol/stock_id, factor_id, value/factor_value
+regime:          date/trade_date, bull, bear, high_vol, low_vol
+```
+
+`production_book` 用于 `spanning.json`，代表生产/上线因子库；`peer_book` 用于 `crowding.json` 和 `diversity.json`，可以包含 production、promoted、research 等更宽的 peer 因子集合。book 内的 `factor_id` 必须是稳定字符串，因为它会出现在 `max_corr_peer` 和 `top_spanning_factors[].factor_id`。
+
+最小配置示例：
+
+```python
+from factor_backtest import BacktestConfig, CompanyDiagnosticsConfig
+
+company_diagnostics_enabled = True
+
+if company_diagnostics_enabled:
+    diagnostics_config = CompanyDiagnosticsConfig(
+        enabled=True,
+        production_book_path="/data/zhangyuan/company_books/production_book.csv",
+        peer_book_path="/data/zhangyuan/company_books/peer_book.csv",
+        regime_path="/data/zhangyuan/company_books/regime.csv",
+        baseline_suite_id="production_book_2026Q2",
+        baseline_book_version="production_book_2026Q2",
+        peer_book_version="promoted_research_book_2026Q2",
+        hypothesis_direction="unknown",
+        idea_id="idea_quiet_001",
+        version=1,
+    )
+else:
+    diagnostics_config = CompanyDiagnosticsConfig(enabled=False)
+
+cfg = BacktestConfig(
+    factor_name="factor_dm_20d",
+    selected_pools=["all", "hs300_pool", "zz1000_pool", "zz2000_pool"],
+    horizons=[1, 5, 10, 20],
+    diagnostics=diagnostics_config,
+)
+```
+
+`examples/run_factor_dm_20d.py` 已经内置同样的开关式写法。日常回测保持 `company_diagnostics_enabled = False` 即可；需要正式四个 JSON 时改成 `True`，并填写 production book、peer book、regime 等路径。
+
+常用参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `enabled` | `False` | 是否生成正式 company diagnostics；关闭时不读取 book/regime，也不会写 `diagnostics/` |
+| `production_book_source` | `"file"` | production book 来源；当前实现支持 `"file"`，`"clickhouse"` 仅预留 |
+| `peer_book_source` | `"file"` | peer book 来源；当前实现支持 `"file"`，`"clickhouse"` 仅预留 |
+| `regime_source` | `"file"` | regime 来源；当前实现支持 `"file"`，`"clickhouse"` 仅预留 |
+| `production_book_path` | `None` | 生产因子库长表路径；提供后可生成 `spanning.json` |
+| `peer_book_path` | `None` | peer 因子库长表路径；提供后可生成 `crowding.json` 和 `diversity.json` |
+| `factor_meta_path` | `None` | 预留字段；当前不会自动根据 meta 拆分 production/peer |
+| `factor_ls_pnl_path` | `None` | 预留字段；当前暂不计算 `max_abs_returncorr` |
+| `regime_path` | `None` | regime 布尔宽表路径；提供后 `mechanism_consistency.json` 会包含 `regime_detail` |
+| `baseline_suite_id` | `None` | 写入 `spanning.json` 的生产库标识 |
+| `baseline_book_version` | `None` | 写入 `spanning.meta.baseline_book_version` |
+| `peer_book_version` | `None` | 写入 `crowding/diversity.meta.peer_book_version` |
+| `peer_pool_id` | `"research+promoted"` | 写入 `crowding.json` 的 peer 池标识 |
+| `hypothesis_direction` | `"unknown"` | 可选 `"high_is_long"`、`"high_is_short"`、`"unknown"`；方向未知时方向匹配字段写 `null` |
+| `idea_id` | `None` | 写入 `diversity.json` 的 idea 标识 |
+| `version` | `1` | 写入 `diversity.json` 的因子版本号 |
+| `regime_labels` | `["bull", "bear", "high_vol", "low_vol"]` | 从 regime 宽表读取的固定标签列 |
+| `neutralization_layers` | `["production_book"]` | 写入 `spanning.json` 的中性化/控制层说明 |
+| `spanning_topk` | `20` | 每轮残差化选择最相关 production 因子数量 |
+| `spanning_rounds` | `3` | 迭代残差化轮数 |
+| `top_spanning_factors` | `5` | `top_spanning_factors` 列表保留的最相似 production 因子数量 |
+| `topk_overlap_k` | `50` | crowding 多空两端 overlap 的 TopK |
+| `crowding_threshold` | `0.7` | 预留配置；当前 `n_peers_above_0.7` 固定按字段名里的 `0.7` 计算 |
+| `min_similarity_stocks` | `30` | RankCorr、残差化和增量 R2 的最小有效股票数 |
+| `framework_version` | `"Factor_Backtest_2_2_1"` | 写入 diagnostics `meta.framework_version` |
+
+主要口径：
+
+- `crowding.max_abs_rankcorr`：候选因子和每个 peer 的每日截面绝对 RankCorr 先按交易日取均值，再取最大 peer。
+- `diversity.max_similarity_to_book`：与 `crowding` 使用同一套 mean abs RankCorr 口径，只基于 `all` pool 输出一份。
+- `spanning.incremental_ic`：候选因子按 `production_book` 中最相关因子迭代残差化后的残差 IC。
+- `spanning.incremental_r2`：用已选 production 因子做基准回归，再加入残差候选因子的日度截面 R2 提升。
+- `mechanism_consistency.group_monotonicity`：G1-G10 平均分组收益的 Spearman 单调性。
+- `mechanism_consistency.regime_detail`：在固定 regime 标签子样本内计算 IC；当 `hypothesis_direction="unknown"` 时，`sign_matches_hypothesis` 和 `regime_sign_consistency` 为 `null`。
+
+正式 diagnostics 遵守公司侧固定 schema：只输出 `all`、`hs300_pool`、`zz1000_pool`、`zz2000_pool` 四个 pool 的交集；horizon 型文件只输出 `"1"`、`"5"`、`"10"`、`"20"`。其他普通回测 pool、external return 或自定义 horizon 可以继续用于常规报告，但不会写入这四类正式 JSON。

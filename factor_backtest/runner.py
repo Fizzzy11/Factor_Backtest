@@ -22,6 +22,7 @@ from factor_backtest.analytics import (
     validate_ic_methods,
 )
 from factor_backtest.config import BacktestConfig
+from factor_backtest.company_diagnostics import export_company_diagnostics
 from factor_backtest.filters import compute_tradability_mask
 from factor_backtest.handoff import export_factor_backtest_platform_handoff
 from factor_backtest.io import ensure_dir, read_json, read_table, write_json, write_table
@@ -83,6 +84,7 @@ def run_factor_backtest(
         pool_dir=cfg.paths.pool_dir,
     )
     status: dict[str, dict[str, SectionResult]] = {}
+    diagnostic_contexts: dict[str, dict] = {}
     run_warnings: list[str] = list(risk_exposure.warnings) if risk_exposure is not None else []
     timings: dict = {"pools": {}}
 
@@ -200,6 +202,12 @@ def run_factor_backtest(
             "render_plots": cfg.render_plots,
             "write_neutralized_factors": cfg.write_neutralized_factors,
         }
+        diagnostic_contexts[pool_name] = {
+            "factor": filtered_factor,
+            "future_returns": future_returns,
+            "daily_group_returns": daily_group_returns,
+            "return_horizon_days": return_horizon_days,
+        }
 
         artifacts_start = perf_counter()
         if cfg.artifact_level == "full":
@@ -251,6 +259,15 @@ def run_factor_backtest(
             }
         pool_timing["total_seconds"] = _elapsed(pool_start)
 
+    diagnostics_start = perf_counter()
+    diagnostic_warnings = export_company_diagnostics(
+        run_dir=run_dir,
+        config=cfg,
+        pool_contexts=diagnostic_contexts,
+    )
+    run_warnings.extend(diagnostic_warnings)
+    timings["company_diagnostics_seconds"] = _elapsed(diagnostics_start)
+
     run_meta = {
         "framework_version": cfg.framework_version,
         "factor_name": resolved_factor_name,
@@ -273,6 +290,7 @@ def run_factor_backtest(
         "artifact_level": cfg.artifact_level,
         "render_plots": cfg.render_plots,
         "write_neutralized_factors": cfg.write_neutralized_factors,
+        "company_diagnostics_enabled": cfg.diagnostics.enabled,
     }
     timings["total_seconds"] = _elapsed(run_start)
     write_json(run_meta, run_dir / "run_meta.json")

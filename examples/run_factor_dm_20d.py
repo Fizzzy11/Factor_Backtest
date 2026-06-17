@@ -1,5 +1,5 @@
 from factor_backtest.clickhouse_adapter import load_market_data_from_clickhouse
-from factor_backtest.config import BacktestConfig, DataSourceConfig, HandoffConfig, PathConfig
+from factor_backtest.config import BacktestConfig, CompanyDiagnosticsConfig, DataSourceConfig, HandoffConfig, PathConfig
 from factor_backtest.factor_loader import load_factor_file, resolve_factor_path
 from factor_backtest.runner import run_factor_backtest
 
@@ -89,6 +89,44 @@ def main() -> None:
     # If None, handoff data_asof uses the max date in factor_df.index.
     handoff_data_asof = None
 
+    # ===== 10. Company diagnostics parameters =====
+    # Formal company diagnostics are different from the first-round handoff pending files.
+    # Default is off. When enabled, computed JSON files are written to:
+    # /data/zhangyuan/Factor_Backtest_Result/factor_dm_20d/runs/<run_time>/diagnostics/
+    # /data/zhangyuan/Factor_Backtest_Result/factor_dm_20d/latest/diagnostics/
+    #
+    # Expected book input is a long panel:
+    # date/trade_date, symbol/stock_id, factor_id, value/factor_value
+    # Regime input is a boolean wide table:
+    # date/trade_date, bull, bear, high_vol, low_vol
+    company_diagnostics_enabled = False
+
+    company_diagnostics_production_book_source = "file"
+    company_diagnostics_peer_book_source = "file"
+    company_diagnostics_regime_source = "file"
+    production_book_path = None
+    peer_book_path = None
+    factor_meta_path = None
+    factor_ls_pnl_path = None
+    regime_path = None
+
+    baseline_suite_id = None
+    baseline_book_version = None
+    peer_book_version = None
+    peer_pool_id = "research+promoted"
+
+    hypothesis_direction = "unknown"  # "high_is_long", "high_is_short", or "unknown"
+    idea_id = None
+    idea_version = 1
+    regime_labels = ["bull", "bear", "high_vol", "low_vol"]
+    neutralization_layers = ["production_book"]
+
+    spanning_topk = 20
+    spanning_rounds = 3
+    top_spanning_factors = 5
+    topk_overlap_k = 50
+    min_similarity_stocks = 30
+
     resolved_factor_path = factor_path or resolve_factor_path(
         data_root=data_root,
         factor_name=factor_name_for_path,
@@ -107,6 +145,35 @@ def main() -> None:
         end_date=market_end_date,
         verbose=verbose,
     )
+
+    if company_diagnostics_enabled:
+        diagnostics_config = CompanyDiagnosticsConfig(
+            enabled=True,
+            production_book_source=company_diagnostics_production_book_source,
+            peer_book_source=company_diagnostics_peer_book_source,
+            regime_source=company_diagnostics_regime_source,
+            production_book_path=production_book_path,
+            peer_book_path=peer_book_path,
+            factor_meta_path=factor_meta_path,
+            factor_ls_pnl_path=factor_ls_pnl_path,
+            regime_path=regime_path,
+            baseline_suite_id=baseline_suite_id,
+            baseline_book_version=baseline_book_version,
+            peer_book_version=peer_book_version,
+            peer_pool_id=peer_pool_id,
+            hypothesis_direction=hypothesis_direction,
+            idea_id=idea_id,
+            version=idea_version,
+            regime_labels=regime_labels,
+            neutralization_layers=neutralization_layers,
+            spanning_topk=spanning_topk,
+            spanning_rounds=spanning_rounds,
+            top_spanning_factors=top_spanning_factors,
+            topk_overlap_k=topk_overlap_k,
+            min_similarity_stocks=min_similarity_stocks,
+        )
+    else:
+        diagnostics_config = CompanyDiagnosticsConfig(enabled=False)
 
     cfg = BacktestConfig(
         paths=PathConfig(data_root=data_root, risk_exposure_path=risk_exposure_path),
@@ -134,6 +201,7 @@ def main() -> None:
             factor_direction=handoff_factor_direction,
             data_asof=handoff_data_asof,
         ),
+        diagnostics=diagnostics_config,
         verbose=verbose,
     )
 

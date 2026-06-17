@@ -26,6 +26,8 @@ def test_backtest_config_defaults_match_design():
     assert cfg.write_neutralized_factors is False
     assert cfg.handoff.enabled is False
     assert cfg.handoff.output_dir == Path("docs/handoffs/factor_backtest_platform")
+    assert cfg.diagnostics.enabled is False
+    assert cfg.diagnostics.hypothesis_direction == "unknown"
     assert cfg.group_return_windows == {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
     assert cfg.verbose is True
     assert cfg.data_sources.market_data_source == "clickhouse"

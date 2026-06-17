@@ -75,6 +75,51 @@ class HandoffConfig:
 
 
 @dataclass(frozen=True)
+class CompanyDiagnosticsConfig:
+    enabled: bool = False
+    production_book_source: Literal["file", "clickhouse"] = "file"
+    peer_book_source: Literal["file", "clickhouse"] = "file"
+    regime_source: Literal["file", "clickhouse"] = "file"
+    production_book_path: Path | None = None
+    peer_book_path: Path | None = None
+    factor_meta_path: Path | None = None
+    factor_ls_pnl_path: Path | None = None
+    regime_path: Path | None = None
+    baseline_suite_id: str | None = None
+    baseline_book_version: str | None = None
+    peer_book_version: str | None = None
+    peer_pool_id: str = "research+promoted"
+    hypothesis_direction: Literal["high_is_long", "high_is_short", "unknown"] = "unknown"
+    idea_id: str | None = None
+    version: int = 1
+    regime_labels: list[str] = field(default_factory=lambda: ["bull", "bear", "high_vol", "low_vol"])
+    neutralization_layers: list[str] = field(default_factory=lambda: ["production_book"])
+    spanning_topk: int = 20
+    spanning_rounds: int = 3
+    top_spanning_factors: int = 5
+    topk_overlap_k: int = 50
+    crowding_threshold: float = 0.7
+    min_similarity_stocks: int = 30
+    framework_version: str = "Factor_Backtest_2_2_1"
+
+    def __post_init__(self) -> None:
+        for name in ("production_book_path", "peer_book_path", "factor_meta_path", "factor_ls_pnl_path", "regime_path"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, Path(value))
+        if self.spanning_topk <= 0:
+            raise ValueError("spanning_topk must be positive")
+        if self.spanning_rounds <= 0:
+            raise ValueError("spanning_rounds must be positive")
+        if self.top_spanning_factors <= 0:
+            raise ValueError("top_spanning_factors must be positive")
+        if self.topk_overlap_k <= 0:
+            raise ValueError("topk_overlap_k must be positive")
+        if self.min_similarity_stocks <= 1:
+            raise ValueError("min_similarity_stocks must be greater than 1")
+
+
+@dataclass(frozen=True)
 class PoolDefinition:
     path: Path | None
     display_name: str
@@ -129,6 +174,7 @@ class BacktestConfig:
     render_plots: bool = True
     write_neutralized_factors: bool = False
     handoff: HandoffConfig = field(default_factory=HandoffConfig)
+    diagnostics: CompanyDiagnosticsConfig = field(default_factory=CompanyDiagnosticsConfig)
     verbose: bool = True
 
     def __post_init__(self) -> None:
