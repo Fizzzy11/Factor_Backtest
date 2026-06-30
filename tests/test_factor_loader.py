@@ -24,6 +24,24 @@ def test_normalize_wide_factor_dataframe_keeps_trade_date_by_symbol_shape():
     assert out.loc[pd.Timestamp("2026-05-15"), "600000.XSHG"] == 2.0
 
 
+def test_normalize_wide_factor_dataframe_uses_date_column_as_index():
+    raw = pd.DataFrame(
+        {
+            "date": ["2026-05-15", "2026-05-18"],
+            "000001.XSHE": [1.0, np.nan],
+            "600000.XSHG": [2.0, 3.0],
+        }
+    )
+
+    out = normalize_factor_dataframe(raw)
+
+    assert out.index.name == "trade_date"
+    assert list(out.columns) == ["000001.XSHE", "600000.XSHG"]
+    assert out.index.tolist() == [pd.Timestamp("2026-05-15"), pd.Timestamp("2026-05-18")]
+    assert out.loc[pd.Timestamp("2026-05-18"), "600000.XSHG"] == 3.0
+    assert "date" not in out.columns
+
+
 def test_normalize_multiindex_factor_dataframe_pivots_date_asset_to_wide():
     idx = pd.MultiIndex.from_tuples(
         [

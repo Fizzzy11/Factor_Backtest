@@ -63,6 +63,9 @@ def load_factor_file(path: str | Path, h5_key: str | None = None, value_column: 
 
 def _normalize_wide_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    date_col = _pick_column(set(out.columns), DATE_COLUMNS)
+    if date_col is not None:
+        out = out.set_index(date_col)
     out.index = pd.to_datetime(out.index)
     out.index.name = "trade_date"
     out.columns = pd.Index([str(c) for c in out.columns], name=None)

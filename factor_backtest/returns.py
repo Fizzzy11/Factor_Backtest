@@ -117,6 +117,9 @@ def sort_return_labels(values) -> list:
 
 def _normalize_wide_return_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    date_col = _pick_column(set(out.columns), RETURN_DATE_COLUMNS)
+    if date_col is not None:
+        out = out.set_index(date_col)
     out.index = pd.to_datetime(out.index)
     out.index.name = "trade_date"
     out.columns = pd.Index([str(c) for c in out.columns], name=None)

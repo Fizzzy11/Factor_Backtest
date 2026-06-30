@@ -6,7 +6,7 @@ import pandas as pd
 from factor_backtest.config import BacktestConfig
 from factor_backtest.market_data import MarketDataBundle
 from factor_backtest.runner import run_factor_backtest
-from factor_backtest.returns import build_return_specs
+from factor_backtest.returns import build_return_specs, normalize_return_dataframe
 
 
 def _sample_factor_and_market():
@@ -87,6 +87,23 @@ def test_external_return_with_horizon_days_gets_cumulative_group_return_plot():
         group_result = result.section_status["all"]["group_return"]
         assert "group_cumulative_returns_external_5d" in group_result.tables
         assert "group_cumulative_return_external_5d.png" in group_result.plots
+
+
+def test_normalize_wide_external_return_dataframe_uses_date_column_as_index():
+    raw = pd.DataFrame(
+        {
+            "trade_date": ["2026-05-15", "2026-05-18"],
+            "000001.XSHE": [0.01, 0.02],
+            "600000.XSHG": [0.03, 0.04],
+        }
+    )
+
+    out = normalize_return_dataframe(raw)
+
+    assert out.index.name == "trade_date"
+    assert list(out.columns) == ["000001.XSHE", "600000.XSHG"]
+    assert out.loc[pd.Timestamp("2026-05-18"), "600000.XSHG"] == 0.04
+    assert "trade_date" not in out.columns
 
 
 def test_external_return_label_cannot_overwrite_builtin_return_label():

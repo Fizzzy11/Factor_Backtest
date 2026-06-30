@@ -1,8 +1,8 @@
-# 因子排序回测框架 v2.2.1
+# 因子排序回测框架 v2.2.2
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目发布版本为 `2.2.1`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目版本为 `2.2.2`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -10,7 +10,17 @@
 }
 ```
 
-这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 GitHub Release 或 Python 包版本。
+这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 Python 包版本或 GitHub tag。
+
+## v2.2.2 更新内容
+
+`v2.2.2` 是小版本修复，不新建 GitHub Release。重点修正 CSV 宽表读取时的日期列识别问题：
+
+- 因子 CSV 宽表现在支持显式 `date` 或 `trade_date` 列。读取时会把该列设为 `trade_date` index，不会再把默认 RangeIndex 误转成 `1970-01-01` 纳秒序列。
+- 外部收益 CSV/宽表同样支持显式 `date` 或 `trade_date` 列，修复逻辑与因子宽表一致。
+- 仍然兼容原有“日期已经在 DataFrame index 中”的宽表格式，以及长表/MultiIndex 长表格式。
+- 新增回归测试覆盖因子宽表 CSV 和外部收益宽表 CSV 的日期列解析。
+- 该修复解决了 `factor_macd_delta.csv` 这类 `date,000001.XSHE,...` 文件能读取但回测结果全空的问题。
 
 ## v2.2.1 更新内容
 
@@ -54,6 +64,14 @@ index = trade_date
 columns = symbol
 values = factor value
 ```
+
+CSV 文件也可以把日期放在显式列中：
+
+```text
+date/trade_date, 000001.XSHE, 000002.XSHE, ...
+```
+
+框架会自动把 `date` 或 `trade_date` 列转为 `trade_date` index。
 
 `factor_df.loc[t]` 表示 `t` 日收盘后生成、下一交易日开盘前可用的因子值。框架默认在下一交易日开盘按因子排序建仓，未来收益使用 open-to-open：
 
@@ -537,6 +555,14 @@ index = trade_date
 columns = symbol
 value = external return
 ```
+
+CSV 宽表也可以使用显式日期列：
+
+```text
+date/trade_date, 000001.XSHE, 000002.XSHE, ...
+```
+
+框架会自动将该列作为 `trade_date` index。
 
 长表支持：
 
