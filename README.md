@@ -1,8 +1,8 @@
-# 因子排序回测框架 v2.2.2
+# 因子排序回测框架 v2.2.3
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目版本为 `2.2.2`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目版本为 `2.2.3`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -11,6 +11,17 @@
 ```
 
 这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 Python 包版本或 GitHub tag。
+
+## v2.2.3 更新内容
+
+`v2.2.3` 是向后兼容的因子输入格式扩展，不改变回测时间语义、open-to-open 收益计算、股票池、可交易过滤或统计逻辑。主要变化：
+
+- 因子文件读取支持 `.parquet`，并推荐正式生产因子优先使用 parquet。
+- 默认因子发现顺序改为 `.parquet`、`.h5`、`.csv`；同名多格式文件同时存在时优先读取 parquet。
+- parquet 支持单文件宽表、单文件长表，以及后缀为 `.parquet` 的按年份分区目录。
+- 标准因子矩阵仍为 `trade_date × symbol`：`trade_date` 为日频 `DatetimeIndex`，`symbol` 为字符串列名。
+- 加载阶段不会填充、缩尾、标准化或翻转方向；`NaN`、`Inf`、`-Inf` 会原样保留，但后续有效样本筛选不会把非有限值纳入 IC 或分组收益计算。
+- 分区 parquet 目录只读取直接子级 `*.parquet` 文件，忽略 `manifest.json` 和其他非 parquet 文件；不同分区日期不能重叠，否则会明确报错。
 
 ## v2.2.2 更新内容
 
@@ -65,7 +76,7 @@ columns = symbol
 values = factor value
 ```
 
-CSV 文件也可以把日期放在显式列中：
+CSV/parquet 宽表也可以把日期放在显式列中：
 
 ```text
 date/trade_date, 000001.XSHE, 000002.XSHE, ...
@@ -123,6 +134,7 @@ examples/run_factor_dm_20d.py
 如果因子名为 `dm_20d`，默认查找：
 
 ```text
+/data/zhangyuan/factor_dm_20d/factor_dm_20d.parquet
 /data/zhangyuan/factor_dm_20d/factor_dm_20d.h5
 /data/zhangyuan/factor_dm_20d/factor_dm_20d.csv
 ```
@@ -136,6 +148,8 @@ examples/run_factor_dm_20d.py
 - 标准宽表：`trade_date x symbol`
 - MultiIndex 长表：`date/asset` 双索引
 - 普通长表：`trade_date/date + symbol/asset + value/factor/factor_value`
+- 单文件 parquet：宽表或长表均可
+- 分区 parquet 目录：后缀为 `.parquet` 的目录，目录内直接放置 `2024.parquet`、`2025.parquet` 等分区文件
 
 内部统一输出为：
 
@@ -143,6 +157,33 @@ examples/run_factor_dm_20d.py
 index = trade_date
 columns = symbol
 ```
+
+单文件 parquet 示例：
+
+```python
+factor_path = "/data/zhangyuan/factor_order_imbalance_v1/factor_order_imbalance_v1.parquet"
+factor_df = load_factor_file(factor_path)
+```
+
+按年份分区 parquet 目录示例：
+
+```text
+/data/zhangyuan/factor_order_imbalance_v1/
+  manifest.json
+  factor_order_imbalance_v1.parquet/
+    2024.parquet
+    2025.parquet
+    2026.parquet
+```
+
+调用时把 `factor_path` 指向后缀为 `.parquet` 的目录：
+
+```python
+factor_path = "/data/zhangyuan/factor_order_imbalance_v1/factor_order_imbalance_v1.parquet"
+factor_df = load_factor_file(factor_path)
+```
+
+分区目录不会递归读取更深层目录。不同年度股票列可以不完全一致，框架会取列并集并保留缺失位置为 `NaN`；但不同分区不能包含重复 `trade_date`。
 
 ## 股票池
 

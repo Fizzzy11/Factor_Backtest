@@ -6,12 +6,20 @@ from factor_backtest.runner import run_factor_backtest
 
 def main() -> None:
     # ===== 1. Factor file parameters =====
-    # Existing factor file:
+    # 因子文件可以是单个 .parquet 文件、后缀为 .parquet 的分区目录、
+    # 原有 H5 文件或 CSV 文件。factor_path=None 时按默认优先级自动发现：
+    # /data/zhangyuan/factor_dm_20d/factor_dm_20d.parquet
     # /data/zhangyuan/factor_dm_20d/factor_dm_20d.h5
+    # /data/zhangyuan/factor_dm_20d/factor_dm_20d.csv
     data_root = "/data/zhangyuan"
     factor_name_for_path = "dm_20d"
     factor_display_name = "factor_dm_20d"
+    # 也可以显式指定：
+    # factor_path = "/data/zhangyuan/factor_dm_20d/factor_dm_20d.parquet"
+    # factor_path = "/data/zhangyuan/factor_dm_20d/factor_dm_20d.h5"
+    # factor_path = "/data/zhangyuan/factor_dm_20d/factor_dm_20d.csv"
     factor_path = None
+    # 只在读取 H5 时生效；CSV 和 parquet 会忽略该参数。
     factor_h5_key = None
 
     # ===== 2. Market data parameters =====
