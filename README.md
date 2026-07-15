@@ -18,10 +18,10 @@
 
 - 因子文件读取支持 `.parquet`，并推荐正式生产因子优先使用 parquet。
 - 默认因子发现顺序改为 `.parquet`、`.h5`、`.csv`；同名多格式文件同时存在时优先读取 parquet。
-- parquet 支持单文件宽表、单文件长表，以及后缀为 `.parquet` 的按年份分区目录。
+- parquet 支持单文件宽表、单文件长表，以及后缀为 `.parquet` 的按月或按年分区目录。
 - 标准因子矩阵仍为 `trade_date × symbol`：`trade_date` 为日频 `DatetimeIndex`，`symbol` 为字符串列名。
 - 加载阶段不会填充、缩尾、标准化或翻转方向；`NaN`、`Inf`、`-Inf` 会原样保留，但后续有效样本筛选不会把非有限值纳入 IC 或分组收益计算。
-- 分区 parquet 目录只读取直接子级 `*.parquet` 文件，忽略 `manifest.json` 和其他非 parquet 文件；不同分区日期不能重叠，否则会明确报错。
+- 分区 parquet 目录只读取直接子级 `*.parquet` 文件，忽略 `manifest.json` 和其他非 parquet 文件；不同分区日期不能重叠，否则会明确报错。日频因子需要每日追加时，推荐按月分区，以减少更新当前数据时的重复 I/O。
 
 ## v2.2.2 更新内容
 
@@ -149,7 +149,7 @@ examples/run_factor_dm_20d.py
 - MultiIndex 长表：`date/asset` 双索引
 - 普通长表：`trade_date/date + symbol/asset + value/factor/factor_value`
 - 单文件 parquet：宽表或长表均可
-- 分区 parquet 目录：后缀为 `.parquet` 的目录，目录内直接放置 `2024.parquet`、`2025.parquet` 等分区文件
+- 分区 parquet 目录：后缀为 `.parquet` 的目录，目录内直接放置 `2024-01.parquet`、`2024-02.parquet` 等月度分区文件，也支持 `2024.parquet`、`2025.parquet` 等年度分区文件
 
 内部统一输出为：
 
@@ -165,15 +165,15 @@ factor_path = "/data/zhangyuan/factor_order_imbalance_v1/factor_order_imbalance_
 factor_df = load_factor_file(factor_path)
 ```
 
-按年份分区 parquet 目录示例：
+按月分区 parquet 目录示例（日频因子生产推荐）：
 
 ```text
 /data/zhangyuan/factor_order_imbalance_v1/
   manifest.json
   factor_order_imbalance_v1.parquet/
-    2024.parquet
-    2025.parquet
-    2026.parquet
+    2026-01.parquet
+    2026-02.parquet
+    2026-03.parquet
 ```
 
 调用时把 `factor_path` 指向后缀为 `.parquet` 的目录：
@@ -183,7 +183,9 @@ factor_path = "/data/zhangyuan/factor_order_imbalance_v1/factor_order_imbalance_
 factor_df = load_factor_file(factor_path)
 ```
 
-分区目录不会递归读取更深层目录。不同年度股票列可以不完全一致，框架会取列并集并保留缺失位置为 `NaN`；但不同分区不能包含重复 `trade_date`。
+每个月度文件保存当月所有交易日的日频因子。每日更新时只需读取并重写当月文件，无需重写全年数据，因此更适合持续增量生成因子的场景。分区粒度只影响存储和更新方式，不改变因子日期语义或回测计算结果。
+
+分区目录不会递归读取更深层目录。不同分区的股票列可以不完全一致，框架会取列并集并保留缺失位置为 `NaN`；但不同分区不能包含重复 `trade_date`。当前回测加载时仍会读取目录内全部月度文件，月度分区主要优化因子数据的日常写入，不代表按回测日期范围自动跳过无关分区。
 
 ## 股票池
 
