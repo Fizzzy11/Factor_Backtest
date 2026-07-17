@@ -22,6 +22,7 @@
 - 标准因子矩阵仍为 `trade_date × symbol`：`trade_date` 为日频 `DatetimeIndex`，`symbol` 为字符串列名。
 - 加载阶段不会填充、缩尾、标准化或翻转方向；`NaN`、`Inf`、`-Inf` 会原样保留，但后续有效样本筛选不会把非有限值纳入 IC 或分组收益计算。
 - 分区 parquet 目录只读取直接子级 `*.parquet` 文件，忽略 `manifest.json` 和其他非 parquet 文件；不同分区日期不能重叠，否则会明确报错。日频因子需要每日追加时，推荐按月分区，以减少更新当前数据时的重复 I/O。
+- 宽表数值校验改为一次性合并转换后的股票列，避免数千列因子矩阵逐列插入导致 pandas `DataFrame is highly fragmented` 性能警告，同时保持原有非数值报错和 `NaN`、`Inf`、`-Inf` 处理语义不变。
 
 ## v2.2.2 更新内容
 
