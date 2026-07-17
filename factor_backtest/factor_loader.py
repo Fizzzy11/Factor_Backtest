@@ -171,9 +171,11 @@ def _coerce_symbol_columns(columns: pd.Index) -> pd.Index:
 
 
 def _coerce_numeric_values(df: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame(index=df.index)
-    for column in df.columns:
-        out[column] = _coerce_numeric_series(df[column], column_name=str(column))
+    converted_columns = [
+        _coerce_numeric_series(df[column], column_name=str(column))
+        for column in df.columns
+    ]
+    out = pd.concat(converted_columns, axis=1) if converted_columns else df.copy()
     out.columns = df.columns
     return out
 

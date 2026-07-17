@@ -1,5 +1,6 @@
 from pathlib import Path
 import tempfile
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -297,6 +298,22 @@ def test_factor_non_numeric_values_error():
 
     with pytest.raises(ValueError, match="must be numeric"):
         normalize_factor_dataframe(raw)
+
+
+def test_wide_factor_numeric_validation_does_not_fragment_dataframe():
+    dates = pd.DatetimeIndex(["2026-05-15", "2026-05-18"], name="trade_date")
+    columns = [f"S{i:04d}" for i in range(256)]
+    raw = pd.DataFrame(
+        np.arange(len(dates) * len(columns), dtype="float64").reshape(len(dates), len(columns)),
+        index=dates,
+        columns=columns,
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", pd.errors.PerformanceWarning)
+        out = normalize_factor_dataframe(raw)
+
+    pd.testing.assert_frame_equal(out, raw.rename_axis(columns="symbol"))
 
 
 def test_factor_symbol_duplicates_after_string_conversion_error():
