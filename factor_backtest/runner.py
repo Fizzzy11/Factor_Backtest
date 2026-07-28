@@ -192,6 +192,8 @@ def run_factor_backtest(
             "plot_index": filtered_factor.index,
             "horizon_colors": cfg.horizon_colors,
             "group_return_windows": cfg.group_return_windows,
+            "yearly_ic_min_days": cfg.yearly_ic_min_days,
+            "yearly_ic_include_partial_year": cfg.yearly_ic_include_partial_year,
             "return_horizon_days": return_horizon_days,
             "risk_exposure": risk_exposure,
             "risk_exposure_panel": risk_exposure_panel,
@@ -286,6 +288,8 @@ def run_factor_backtest(
         "risk_exposure_path": str(cfg.paths.risk_exposure_path),
         "enabled_sections": cfg.enabled_sections,
         "group_return_windows": cfg.group_return_windows,
+        "yearly_ic_min_days": cfg.yearly_ic_min_days,
+        "yearly_ic_include_partial_year": cfg.yearly_ic_include_partial_year,
         "output_layout": cfg.output_layout,
         "artifact_level": cfg.artifact_level,
         "render_plots": cfg.render_plots,
@@ -333,6 +337,7 @@ def run_factor_backtest_minimal(
         external_returns=external_returns,
     )
     future_returns_all = {label: spec.data for label, spec in return_specs.items()}
+    return_horizon_days = {label: spec.horizon_days for label, spec in return_specs.items()}
     rows = []
     for pool_name, pool_mask in resolve_selected_pools(
         cfg.selected_pools,
@@ -376,8 +381,8 @@ def run_factor_backtest_minimal(
         )
         long_short = compute_long_short_returns(group_returns)
         quality = compute_quality_metrics(pool_factor, pool_bool, valid_mask)
-        ic_stats = compute_ic_stats(daily_ic)
-        perf = compute_performance_metrics(long_short)
+        ic_stats = compute_ic_stats(daily_ic, horizon_days=return_horizon_days)
+        perf = compute_performance_metrics(long_short, horizon_days=return_horizon_days)
         row = {
             "factor_name": cfg.factor_name,
             "pool": pool_name,
@@ -392,11 +397,15 @@ def run_factor_backtest_minimal(
             row[f"ic_mean_{h_key}"] = ic_row.get("ic_mean", np.nan)
             row[f"icir_{h_key}"] = ic_row.get("icir", np.nan)
             row[f"ic_t_stat_{h_key}"] = ic_row.get("t_stat", np.nan)
+            row[f"icir_raw_{h_key}"] = ic_row.get("icir_raw", np.nan)
+            row[f"ic_t_stat_hac_{h_key}"] = ic_row.get("t_stat_hac", np.nan)
             ls_key = f"long_short_{h_key}"
             ls_row = perf.loc[ls_key] if ls_key in perf.index else pd.Series(dtype=float)
             row[f"long_short_mean_{h_key}"] = ls_row.get("mean", np.nan)
             row[f"long_short_sharpe_{h_key}"] = ls_row.get("sharpe", np.nan)
             row[f"long_short_t_stat_{h_key}"] = ls_row.get("t_stat", np.nan)
+            row[f"long_short_mean_over_std_raw_{h_key}"] = ls_row.get("mean_over_std_raw", np.nan)
+            row[f"long_short_t_stat_hac_{h_key}"] = ls_row.get("t_stat_hac", np.nan)
         rows.append(row)
     return pd.DataFrame(rows).set_index(["factor_name", "pool"])
 
@@ -560,11 +569,14 @@ def _load_section_results_from_disk(pool_dir: Path) -> dict[str, SectionResult]:
         group_return_tables.extend(sorted(path.stem for path in tables_dir.glob("group_cumulative_returns_*.csv")))
     ic_overview_tables = ["ic_overview"]
     cumulative_ic_tables = ["daily_ic", "cumulative_ic", "ic_stats"]
+    yearly_ic_tables = []
     if tables_dir.exists():
         ic_overview_tables.extend(sorted(path.stem for path in tables_dir.glob("ic_overview_*.csv")))
         cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("daily_ic_*.csv")))
         cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("cumulative_ic_*.csv")))
         cumulative_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("ic_stats_*.csv")))
+        yearly_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("yearly_ic_stats_*.csv")))
+        yearly_ic_tables.extend(sorted(path.stem for path in tables_dir.glob("yearly_mean_ic_*.csv")))
         ic_overview_tables = list(dict.fromkeys(ic_overview_tables))
         cumulative_ic_tables = list(dict.fromkeys(cumulative_ic_tables))
     factor_style_tables = []
@@ -593,6 +605,7 @@ def _load_section_results_from_disk(pool_dir: Path) -> dict[str, SectionResult]:
         "data_quality": ["data_quality", "data_quality_counts", "data_quality_ratios"],
         "ic_overview": ic_overview_tables,
         "cumulative_ic": cumulative_ic_tables,
+        "yearly_ic": list(dict.fromkeys(yearly_ic_tables)),
         "factor_style_exposure": list(dict.fromkeys(factor_style_tables)),
         "style_neutralized_ic": list(dict.fromkeys(style_neutralized_tables)),
         "style_industry_neutralized_ic": list(dict.fromkeys(style_industry_neutralized_tables)),
@@ -600,14 +613,27 @@ def _load_section_results_from_disk(pool_dir: Path) -> dict[str, SectionResult]:
         "group_return": group_return_tables,
         "within_industry_group_return": list(dict.fromkeys(within_industry_group_tables)),
         "layered_group_return": ["layered_group_return_summary"],
-        "long_short": ["daily_long_short_returns", "cumulative_long_short_returns"],
-        "group_turnover": ["daily_group_turnover", "group_turnover_summary", "group_turnover_edge_summary"],
-        "performance_metrics": ["performance_metrics"],
+        "long_short": [
+            "daily_long_short_returns",
+            "cumulative_long_short_returns",
+            "daily_equivalent_long_short_returns",
+            "cumulative_daily_equivalent_long_short_returns",
+        ],
+        "group_turnover": [
+            "daily_group_turnover",
+            "group_turnover_summary",
+            "group_turnover_edge_summary",
+            "daily_group_membership_change",
+            "group_membership_change_summary",
+            "group_membership_change_edge_summary",
+        ],
+        "performance_metrics": ["performance_metrics", "performance_diagnostics"],
     }
     plot_map = {
         "data_quality": ["data_quality_counts.png", "data_quality_ratios.png"],
         "ic_overview": sorted(p.name for p in plots_dir.glob("ic_overview*.png")) if plots_dir.exists() else ["ic_overview.png"],
         "cumulative_ic": sorted(p.name for p in plots_dir.glob("cumulative_ic*.png")) if plots_dir.exists() else ["cumulative_ic.png"],
+        "yearly_ic": sorted(p.name for p in plots_dir.glob("yearly_mean_ic_*.png")) if plots_dir.exists() else [],
         "factor_style_exposure": sorted(p.name for p in plots_dir.glob("factor_style_exposure_corr*.png")) if plots_dir.exists() else [],
         "style_neutralized_ic": sorted(p.name for p in plots_dir.glob("cumulative_style_neutralized_ic*.png"))
         if plots_dir.exists()
@@ -684,9 +710,19 @@ def _read_section_table(path: Path, table_name: str) -> pd.DataFrame:
             names=["leg", exposure_level],
         )
         return df
-    if table_name == "daily_group_turnover":
+    if table_name in {"daily_group_turnover", "daily_group_membership_change"}:
         df = pd.read_csv(path, index_col=0)
         df.index = pd.to_datetime(df.index)
+        return df
+    if table_name.startswith("yearly_ic_stats_"):
+        df = pd.read_csv(path, index_col=[0, 1])
+        df.index = pd.MultiIndex.from_arrays(
+            [
+                df.index.get_level_values(0).astype(int),
+                df.index.get_level_values(1),
+            ],
+            names=["year", "horizon"],
+        )
         return df
     if table_name == "layered_group_return_summary":
         df = pd.read_csv(path, index_col=[0, 1, 2])
@@ -797,6 +833,10 @@ def _render_report_header(meta: dict, warnings: list[str]) -> str:
     parts = [
         "<p class=\"muted\">本报告汇总单次回测中各股票池的关键图表、核心统计表和模块运行状态。"
         f"{artifact_note}{plot_note}</p>",
+        "<p class=\"muted\">多日 horizon 使用逐日重叠远期收益。IC 与多空均值显著性默认查看 Newey-West "
+        "HAC t-stat（lag=horizon_days-1）；ICIR 与 mean_over_std_raw 均为未年化 mean/std。"
+        "分组和多空累计线是日等效诊断曲线，不代表可直接交易的组合净值；多日重叠收益不报告可实现最大回撤。"
+        "当前所谓换手仅表示相邻因子日的分组成员变化率，不是持仓权重换手率。</p>",
         f"<div class=\"meta\"><table>{meta_rows}</table></div>",
     ]
     if warnings:
@@ -849,6 +889,16 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
                 continue
             method = plot_name.removeprefix("ic_overview_").removesuffix(".png")
             overview_plot_order.append(("ic_overview", plot_name, f"20-Day Moving Average {method.title()} IC"))
+    yearly_plot_order = []
+    yearly_result = sections.get("yearly_ic")
+    if yearly_result is not None:
+        for method, title in (
+            ("spearman", "Yearly Mean Spearman RankIC"),
+            ("pearson", "Yearly Mean Pearson IC"),
+        ):
+            plot_name = f"yearly_mean_ic_{method}.png"
+            if plot_name in yearly_result.plots:
+                yearly_plot_order.append(("yearly_ic", plot_name, title))
     builtin_group_plots = [
         ("group_return", "group_cumulative_return_1d.png", "10-Group Cumulative Return 1D"),
         ("group_return", "group_cumulative_return_5d.png", "10-Group Cumulative Return 5D"),
@@ -934,12 +984,13 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
             "within_industry_group_cumulative_return_20d.png",
             "Within-Industry 10-Group Cumulative Return 20D",
         ),
-        ("group_turnover", "group_turnover_edges.png", "G1 and G10 Turnover"),
-        ("group_turnover", "group_turnover.png", "10-Group Turnover"),
+        ("group_turnover", "group_turnover_edges.png", "Daily G1 and G10 Membership Change"),
+        ("group_turnover", "group_turnover.png", "10-Group Daily Membership Change"),
     ]
     plot_order = [
         *ic_plot_order,
         *overview_plot_order,
+        *yearly_plot_order,
         *builtin_group_plots,
         *extra_group_plots,
         ("group_return", "group_return_bar.png", "10-Group Forward Returns"),
@@ -947,7 +998,11 @@ def _render_key_plots(run_dir: Path, sections: dict[str, SectionResult]) -> str:
         ("layered_group_return", "group_return_bar_1y.png", "10-Group Forward Returns 1Y"),
         ("layered_group_return", "group_return_bar_3y.png", "10-Group Forward Returns 3Y"),
         ("layered_group_return", "group_return_bar_5y.png", "10-Group Forward Returns 5Y"),
-        ("long_short", "long_short_curve.png", "Cumulative Long-Short Return"),
+        (
+            "long_short",
+            "long_short_curve.png",
+            "Cumulative Daily-Equivalent Long-Short Spread (Diagnostic)",
+        ),
         ("data_quality", "data_quality_counts.png", "Factor Coverage Counts"),
         ("data_quality", "data_quality_ratios.png", "Factor Coverage and Invalid Value Ratios"),
         *diagnostic_plot_order,
@@ -978,6 +1033,13 @@ def _render_key_tables(sections: dict[str, SectionResult]) -> str:
             ic_specs.append(("cumulative_ic", "ic_stats_pearson", "Pearson IC Statistics"))
         else:
             ic_specs.append(("cumulative_ic", "ic_stats", "IC Statistics"))
+    yearly_specs = []
+    yearly_result = sections.get("yearly_ic")
+    if yearly_result is not None:
+        if "yearly_ic_stats_spearman" in yearly_result.tables:
+            yearly_specs.append(("yearly_ic", "yearly_ic_stats_spearman", "Yearly Spearman RankIC Statistics"))
+        if "yearly_ic_stats_pearson" in yearly_result.tables:
+            yearly_specs.append(("yearly_ic", "yearly_ic_stats_pearson", "Yearly Pearson IC Statistics"))
     style_exposure_specs = []
     style_exposure_result = sections.get("factor_style_exposure")
     if style_exposure_result is not None:
@@ -1018,6 +1080,7 @@ def _render_key_tables(sections: dict[str, SectionResult]) -> str:
             )
     specs = [
         *ic_specs,
+        *yearly_specs,
         *style_exposure_specs,
         *neutralized_specs,
         ("group_exposure_diagnostics", "group_style_exposure_summary", "Group Style Exposure Summary"),
@@ -1025,11 +1088,32 @@ def _render_key_tables(sections: dict[str, SectionResult]) -> str:
         ("group_return", "group_return_summary", "Group Return Summary"),
         ("within_industry_group_return", "within_industry_group_return_summary", "Within-Industry Group Return Summary"),
         ("layered_group_return", "layered_group_return_summary", "Layered Group Return Summary"),
-        ("long_short", "cumulative_long_short_returns", "Cumulative Long-Short Return Tail"),
-        ("group_turnover", "group_turnover_edge_summary", "Group Turnover Edge Summary"),
-        ("group_turnover", "group_turnover_summary", "Group Turnover Summary"),
-        ("performance_metrics", "performance_metrics", "Performance Metrics"),
+        (
+            "long_short",
+            "cumulative_daily_equivalent_long_short_returns",
+            "Cumulative Daily-Equivalent Long-Short Spread Tail (Diagnostic)",
+        ),
+        ("group_turnover", "group_membership_change_edge_summary", "Group Membership Change Edge Summary"),
+        ("group_turnover", "group_membership_change_summary", "Group Membership Change Summary"),
+        ("performance_metrics", "performance_diagnostics", "Long-Short Diagnostics"),
     ]
+    if sections.get("long_short") is not None and "cumulative_daily_equivalent_long_short_returns" not in sections[
+        "long_short"
+    ].tables:
+        specs.append(("long_short", "cumulative_long_short_returns", "Legacy Cumulative Long-Short Return Tail"))
+    if sections.get("group_turnover") is not None and "group_membership_change_summary" not in sections[
+        "group_turnover"
+    ].tables:
+        specs.extend(
+            [
+                ("group_turnover", "group_turnover_edge_summary", "Legacy Group Turnover Edge Summary"),
+                ("group_turnover", "group_turnover_summary", "Legacy Group Turnover Summary"),
+            ]
+        )
+    if sections.get("performance_metrics") is not None and "performance_diagnostics" not in sections[
+        "performance_metrics"
+    ].tables:
+        specs.append(("performance_metrics", "performance_metrics", "Legacy Performance Metrics"))
     parts = ["<h3>关键统计表</h3>"]
     rendered = 0
     for section_name, table_name, title in specs:
@@ -1039,9 +1123,36 @@ def _render_key_tables(sections: dict[str, SectionResult]) -> str:
         table = result.tables[table_name]
         if table.empty:
             continue
-        view = table.tail(10) if table_name == "cumulative_long_short_returns" else table
+        if table_name.startswith("yearly_ic_stats"):
+            view = table
+        elif "ic_stats" in table_name:
+            report_columns = [
+                "ic_mean",
+                "ic_std",
+                "icir_raw",
+                "ic_positive_ratio",
+                "t_stat_hac",
+                "hac_lag",
+                "valid_days",
+            ]
+            view = table.reindex(columns=[col for col in report_columns if col in table.columns])
+        elif table_name in {
+            "cumulative_long_short_returns",
+            "cumulative_daily_equivalent_long_short_returns",
+        }:
+            view = table.tail(10)
+        else:
+            view = table
         parts.append(f"<h4>{escape(title)}</h4>")
-        parts.append(_dataframe_to_html(view, max_rows=None if table_name != "cumulative_long_short_returns" else 20))
+        parts.append(
+            _dataframe_to_html(
+                view,
+                max_rows=20
+                if table_name
+                in {"cumulative_long_short_returns", "cumulative_daily_equivalent_long_short_returns"}
+                else None,
+            )
+        )
         rendered += 1
     if rendered == 0:
         parts.append("<p class=\"muted\">本次运行没有可展示的关键统计表，请检查 tables 目录或模块 warning。</p>")

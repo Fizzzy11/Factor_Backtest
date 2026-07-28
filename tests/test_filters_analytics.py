@@ -3,12 +3,16 @@ import pandas as pd
 
 from factor_backtest.analytics import (
     compute_daily_group_returns,
+    compute_daily_equivalent_long_short_returns,
     compute_daily_ic,
     compute_daily_rank_ic,
     compute_future_returns,
     compute_ic_stats,
     compute_long_short_returns,
+    compute_newey_west_mean_t_stat,
+    compute_performance_metrics,
     compute_quality_metrics,
+    compute_yearly_ic_stats,
 )
 from factor_backtest.filters import compute_tradability_mask
 
@@ -29,6 +33,102 @@ def test_compute_future_returns_uses_next_open_entry_after_signal_date():
     assert np.isclose(returns[1].loc[pd.Timestamp("2026-05-15"), "A"], 12.0 / 11.0 - 1.0)
     assert np.isclose(returns[2].loc[pd.Timestamp("2026-05-15"), "A"], 15.0 / 11.0 - 1.0)
     assert pd.isna(returns[1].loc[pd.Timestamp("2026-05-19"), "A"])
+
+
+def test_newey_west_statistics_use_horizon_minus_one_lag():
+    ic = pd.DataFrame(
+        {
+            "ic_1d": [0.01, 0.02, 0.03, 0.04, 0.05],
+            "ic_5d": [0.01, 0.03, 0.02, 0.05, 0.04],
+            "ic_external": [0.02, 0.01, 0.03, 0.02, 0.04],
+            "ic_30d": [0.01, 0.02, 0.01, 0.02, 0.03],
+        }
+    )
+
+    stats = compute_ic_stats(ic, horizon_days={"1d": 1, "5d": 5, "external": None, "30d": None})
+
+    assert stats.loc["1d", "hac_lag"] == 0
+    assert stats.loc["5d", "hac_lag"] == 4
+    assert stats.loc["external", "hac_status"] == "missing_horizon_days"
+    assert pd.isna(stats.loc["external", "t_stat_hac"])
+    assert stats.loc["30d", "hac_status"] == "missing_horizon_days"
+    assert stats.loc["5d", "icir"] == stats.loc["5d", "icir_raw"]
+    assert stats.loc["5d", "t_stat"] == stats.loc["5d", "t_stat_naive"]
+
+
+def test_newey_west_lag_is_capped_by_available_observations():
+    t_stat, lag = compute_newey_west_mean_t_stat(pd.Series([0.01, 0.02, 0.03]), lag=20)
+
+    assert lag == 2
+    assert np.isfinite(t_stat)
+
+
+def test_yearly_ic_stats_use_factor_date_year_and_minimum_days():
+    dates = pd.to_datetime(["2024-01-02", "2024-06-03", "2024-12-30", "2025-03-03"])
+    ic = pd.DataFrame({"ic_5d": [0.01, 0.02, 0.03, 0.04]}, index=dates)
+
+    yearly = compute_yearly_ic_stats(ic, horizon_days={"5d": 5}, min_days=2, include_partial_year=True)
+
+    assert yearly.loc[(2024, "5d"), "valid_days"] == 3
+    assert bool(yearly.loc[(2024, "5d"), "is_complete_year"]) is True
+    assert bool(yearly.loc[(2025, "5d"), "meets_min_days"]) is False
+    assert pd.isna(yearly.loc[(2025, "5d"), "ic_mean"])
+    assert yearly.loc[(2024, "5d"), "hac_lag"] == 2
+
+
+def test_yearly_ic_stats_sort_horizons_by_duration():
+    dates = pd.bdate_range("2024-01-02", periods=4)
+    ic = pd.DataFrame(
+        {
+            "ic_1d": [0.01, 0.02, 0.03, 0.04],
+            "ic_5d": [0.01, 0.02, 0.03, 0.04],
+            "ic_10d": [0.01, 0.02, 0.03, 0.04],
+            "ic_20d": [0.01, 0.02, 0.03, 0.04],
+        },
+        index=dates,
+    )
+
+    yearly = compute_yearly_ic_stats(ic, min_days=1)
+
+    assert yearly.index.get_level_values("horizon").tolist() == ["1d", "5d", "10d", "20d"]
+
+
+def test_daily_equivalent_long_short_is_derived_from_each_edge_group():
+    index = pd.MultiIndex.from_tuples(
+        [
+            (pd.Timestamp("2026-05-15"), 5, 1),
+            (pd.Timestamp("2026-05-15"), 5, 10),
+        ],
+        names=["trade_date", "horizon", "group"],
+    )
+    group_returns = pd.DataFrame({"group_return": [0.05, 0.10]}, index=index)
+
+    daily, skipped = compute_daily_equivalent_long_short_returns(
+        group_returns,
+        horizon_days={"5d": 5},
+    )
+
+    expected = (1.10 ** (1 / 5) - 1) - (1.05 ** (1 / 5) - 1)
+    assert np.isclose(daily.loc[pd.Timestamp("2026-05-15"), "long_short_5d"], expected)
+    assert skipped == []
+
+
+def test_performance_metrics_marks_overlapping_drawdown_as_not_applicable():
+    returns = pd.DataFrame(
+        {
+            "long_short_1d": [0.01, -0.02, 0.03],
+            "long_short_5d": [0.05, -0.04, 0.02],
+        }
+    )
+
+    metrics = compute_performance_metrics(returns, horizon_days={"1d": 1, "5d": 5})
+
+    assert metrics.loc["long_short_1d", "max_drawdown_applicable"]
+    assert np.isfinite(metrics.loc["long_short_1d", "diagnostic_max_drawdown"])
+    assert not metrics.loc["long_short_5d", "max_drawdown_applicable"]
+    assert pd.isna(metrics.loc["long_short_5d", "diagnostic_max_drawdown"])
+    assert metrics.loc["long_short_5d", "not_applicable_reason"] == "overlapping_forward_returns"
+    assert metrics.loc["long_short_5d", "hac_lag"] == 2
 
 
 def test_compute_tradability_mask_applies_entry_day_filters_only():

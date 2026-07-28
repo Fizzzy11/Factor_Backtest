@@ -10,6 +10,7 @@ from factor_backtest.config import DEFAULT_HORIZON_COLORS
 
 from factor_backtest.analytics import (
     compute_daily_ic,
+    compute_daily_equivalent_long_short_returns,
     compute_exposure_corr_summary,
     compute_factor_style_exposure_corr,
     compute_factor_style_exposure_corr_from_panel,
@@ -19,6 +20,7 @@ from factor_backtest.analytics import (
     compute_ic_stats,
     compute_neutralized_ic_by_exposure_panel,
     compute_performance_metrics,
+    compute_yearly_ic_stats,
     compute_within_industry_group_returns,
     compute_within_industry_group_returns_from_panel,
     neutralize_factor_by_exposure,
@@ -93,10 +95,21 @@ class CumulativeICSection(ReportSection):
     def compute(self, context) -> SectionResult:
         daily_ic_by_method = context.get("daily_ic_by_method") or {"spearman": context["daily_ic"]}
         tables = {}
+        warnings = []
         for method, ic in daily_ic_by_method.items():
             tables[f"daily_ic_{method}"] = ic
             tables[f"cumulative_ic_{method}"] = ic.cumsum()
-            tables[f"ic_stats_{method}"] = compute_ic_stats(ic)
+            stats = compute_ic_stats(
+                ic,
+                horizon_days=context.get("return_horizon_days"),
+            )
+            tables[f"ic_stats_{method}"] = stats
+            missing_horizon = stats.index[stats["hac_status"] == "missing_horizon_days"].tolist()
+            if missing_horizon:
+                warnings.append(
+                    f"{method} HAC statistics are unavailable without horizon_days: "
+                    + ", ".join(map(str, missing_horizon))
+                )
         if "spearman" in daily_ic_by_method:
             tables["daily_ic"] = tables["daily_ic_spearman"]
             tables["cumulative_ic"] = tables["cumulative_ic_spearman"]
@@ -106,7 +119,7 @@ class CumulativeICSection(ReportSection):
             tables["daily_ic"] = tables[f"daily_ic_{first_method}"]
             tables["cumulative_ic"] = tables[f"cumulative_ic_{first_method}"]
             tables["ic_stats"] = tables[f"ic_stats_{first_method}"]
-        return SectionResult(name=self.name, status="success", tables=tables)
+        return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
 
     def render(self, context, result: SectionResult) -> SectionResult:
         methods = _ic_methods_from_result(result, "cumulative_ic")
@@ -124,6 +137,50 @@ class CumulativeICSection(ReportSection):
                 result,
                 enabled=_plots_enabled(context),
                 horizon_colors=context.get("horizon_colors"),
+            )
+        return result
+
+
+class YearlyICSection(ReportSection):
+    name = "yearly_ic"
+
+    def compute(self, context) -> SectionResult:
+        daily_ic_by_method = context.get("daily_ic_by_method") or {"spearman": context["daily_ic"]}
+        tables = {}
+        warnings = []
+        for method, ic in daily_ic_by_method.items():
+            yearly = compute_yearly_ic_stats(
+                ic,
+                horizon_days=context.get("return_horizon_days"),
+                min_days=context.get("yearly_ic_min_days", 60),
+                include_partial_year=context.get("yearly_ic_include_partial_year", True),
+            )
+            tables[f"yearly_ic_stats_{method}"] = yearly
+            if not yearly.empty and "meets_min_days" in yearly.columns:
+                insufficient = yearly.index[~yearly["meets_min_days"].astype(bool)].tolist()
+                if insufficient:
+                    warnings.append(
+                        f"{method} yearly IC has {len(insufficient)} year-horizon rows below the minimum valid-day threshold"
+                    )
+        return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
+
+    def render(self, context, result: SectionResult) -> SectionResult:
+        for method in _ic_methods_from_result(result, "yearly_ic_stats"):
+            table_name = f"yearly_ic_stats_{method}"
+            yearly = result.tables.get(table_name, pd.DataFrame())
+            if yearly.empty:
+                continue
+            mean_ic = yearly["ic_mean"].unstack("horizon")
+            mean_ic = mean_ic.reindex(columns=sort_return_labels(mean_ic.columns))
+            result.tables[f"yearly_mean_ic_{method}"] = mean_ic
+            _plot_lines(
+                mean_ic,
+                context["plots_dir"] / f"yearly_mean_ic_{method}.png",
+                f"Yearly Mean {_ic_method_label(method)}",
+                result,
+                enabled=_plots_enabled(context),
+                horizon_colors=context.get("horizon_colors"),
+                linewidth=1.8,
             )
         return result
 
@@ -289,7 +346,10 @@ class StyleNeutralizedICSection(ReportSection):
         for method, ic in ic_by_method.items():
             tables[f"style_neutralized_ic_{method}"] = ic
             tables[f"cumulative_style_neutralized_ic_{method}"] = ic.cumsum()
-            tables[f"style_neutralized_ic_stats_{method}"] = compute_ic_stats(ic)
+            tables[f"style_neutralized_ic_stats_{method}"] = compute_ic_stats(
+                ic,
+                horizon_days=context.get("return_horizon_days"),
+            )
         return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
 
     def render(self, context, result: SectionResult) -> SectionResult:
@@ -356,7 +416,10 @@ class StyleIndustryNeutralizedICSection(ReportSection):
         for method, ic in ic_by_method.items():
             tables[f"style_industry_neutralized_ic_{method}"] = ic
             tables[f"cumulative_style_industry_neutralized_ic_{method}"] = ic.cumsum()
-            tables[f"style_industry_neutralized_ic_stats_{method}"] = compute_ic_stats(ic)
+            tables[f"style_industry_neutralized_ic_stats_{method}"] = compute_ic_stats(
+                ic,
+                horizon_days=context.get("return_horizon_days"),
+            )
         return SectionResult(name=self.name, status="success", tables=tables, warnings=warnings)
 
     def render(self, context, result: SectionResult) -> SectionResult:
@@ -457,6 +520,9 @@ class GroupTurnoverSection(ReportSection):
                 "daily_group_turnover": daily,
                 "group_turnover_summary": summary,
                 "group_turnover_edge_summary": edge,
+                "daily_group_membership_change": daily,
+                "group_membership_change_summary": summary,
+                "group_membership_change_edge_summary": edge,
             },
         )
 
@@ -466,7 +532,7 @@ class GroupTurnoverSection(ReportSection):
             _plot_lines(
                 daily,
                 context["plots_dir"] / "group_turnover.png",
-                "10-Group Turnover",
+                "10-Group Daily Membership Change",
                 result,
                 enabled=_plots_enabled(context),
                 colors=_group_colors(len(daily.columns)),
@@ -481,7 +547,7 @@ class GroupTurnoverSection(ReportSection):
                 _plot_lines(
                     edge_daily,
                     context["plots_dir"] / "group_turnover_edges.png",
-                    "G1 and G10 Turnover",
+                    "Daily G1 and G10 Membership Change",
                     result,
                     enabled=_plots_enabled(context),
                     linewidth=1.8,
@@ -669,21 +735,38 @@ class LongShortSection(ReportSection):
 
     def compute(self, context) -> SectionResult:
         daily = context["daily_long_short_returns"]
-        cumulative = daily.cumsum() if not daily.empty else daily
+        legacy_cumulative = daily.cumsum() if not daily.empty else daily
+        daily_equivalent, skipped = compute_daily_equivalent_long_short_returns(
+            context["daily_group_returns"],
+            horizon_days=context.get("return_horizon_days"),
+        )
+        plot_index = context.get("plot_index")
+        if plot_index is not None:
+            cumulative_daily_equivalent = daily_equivalent.reindex(pd.DatetimeIndex(plot_index)).fillna(0.0).cumsum()
+        else:
+            cumulative_daily_equivalent = daily_equivalent.fillna(0.0).cumsum()
+        warnings = []
+        if skipped:
+            warnings.append(
+                "Skipped daily-equivalent long-short curves without horizon_days: " + ", ".join(skipped)
+            )
         return SectionResult(
             name=self.name,
             status="success",
             tables={
                 "daily_long_short_returns": daily,
-                "cumulative_long_short_returns": cumulative,
+                "cumulative_long_short_returns": legacy_cumulative,
+                "daily_equivalent_long_short_returns": daily_equivalent,
+                "cumulative_daily_equivalent_long_short_returns": cumulative_daily_equivalent,
             },
+            warnings=warnings,
         )
 
     def render(self, context, result: SectionResult) -> SectionResult:
         _plot_lines(
-            result.tables["cumulative_long_short_returns"],
+            result.tables["cumulative_daily_equivalent_long_short_returns"],
             context["plots_dir"] / "long_short_curve.png",
-            "Cumulative Long-Short Return",
+            "Cumulative Daily-Equivalent Long-Short Spread (Diagnostic)",
             result,
             enabled=_plots_enabled(context),
             horizon_colors=context.get("horizon_colors"),
@@ -695,14 +778,45 @@ class PerformanceMetricsSection(ReportSection):
     name = "performance_metrics"
 
     def compute(self, context) -> SectionResult:
-        metrics = compute_performance_metrics(context["daily_long_short_returns"])
-        return SectionResult(name=self.name, status="success", tables={"performance_metrics": metrics})
+        metrics = compute_performance_metrics(
+            context["daily_long_short_returns"],
+            horizon_days=context.get("return_horizon_days"),
+        )
+        diagnostic_columns = [
+            "raw_mean",
+            "raw_std",
+            "mean_over_std_raw",
+            "positive_ratio",
+            "t_stat_hac",
+            "hac_lag",
+            "valid_days",
+            "diagnostic_max_drawdown",
+            "max_drawdown_applicable",
+            "not_applicable_reason",
+        ]
+        diagnostic = metrics.reindex(columns=diagnostic_columns)
+        warnings = []
+        missing_horizon = metrics.index[metrics.get("hac_status", pd.Series(dtype=str)) == "missing_horizon_days"].tolist()
+        if missing_horizon:
+            warnings.append(
+                "HAC statistics are unavailable without horizon_days: " + ", ".join(map(str, missing_horizon))
+            )
+        return SectionResult(
+            name=self.name,
+            status="success",
+            tables={
+                "performance_metrics": metrics,
+                "performance_diagnostics": diagnostic,
+            },
+            warnings=warnings,
+        )
 
 
 DEFAULT_SECTIONS: list[ReportSection] = [
     DataQualitySection(),
     ICOverviewSection(),
     CumulativeICSection(),
+    YearlyICSection(),
     FactorStyleExposureSection(),
     StyleNeutralizedICSection(),
     StyleIndustryNeutralizedICSection(),

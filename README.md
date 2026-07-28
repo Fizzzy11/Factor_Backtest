@@ -1,8 +1,8 @@
-# 因子排序回测框架 v2.2.3
+# 因子排序回测框架 v2.3.0
 
 本项目用于评估日频因子的截面排序能力，不是传统撮合式交易回测框架。框架关注因子在不同股票池内的 RankIC、分组收益、多空收益、覆盖率和异常值诊断。
 
-当前项目版本为 `2.2.3`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
+当前项目版本为 `2.3.0`。每次运行的 `run_meta.json` 仍会记录内部输出结构标记：
 
 ```json
 {
@@ -11,6 +11,20 @@
 ```
 
 这里的 `framework_version="v1"` 表示当前报告和结果目录的数据结构版本，不等同于 Python 包版本或 GitHub tag。
+
+## v2.3.0 更新内容
+
+`v2.3.0` 重点修正多日重叠远期收益的统计解释，并增加年度 IC 跟踪。因子日期语义、open-to-open 收益公式、每日滚动计算频率、股票池、可交易过滤、10 分组和外部收益对齐方式均保持不变。
+
+- IC 和多空均值显著性新增 Newey-West HAC t-stat。内置 1D/5D/10D/20D 默认使用 `lag=horizon_days-1`，即 `0/4/9/19`；外部收益使用显式配置的 `horizon_days-1`。
+- IC 统计新增 `icir_raw`、`t_stat_naive`、`t_stat_hac`、`hac_lag`、`valid_days` 和 `hac_status`。报告默认展示 HAC t-stat；旧 `icir`、`t_stat` 字段保留一个兼容周期。
+- 明确 `icir_raw` 和多空 `mean_over_std_raw` 均为未年化 `mean/std`。旧 `sharpe` 字段继续保留以兼容现有下游，但报告不再把它解释为年化 Sharpe。
+- 新增 `yearly_ic` 模块，按因子日 `trade_date` 所在自然年汇总每日 IC。支持 `yearly_ic_min_days` 和 `yearly_ic_include_partial_year`，并分别输出 Spearman/Pearson 年度表和图。
+- 多空累计图改为日等效 spread 诊断：先分别把 G10、G1 的 h 日收益转换为日等效收益，再计算两组之差并累计。该曲线用于跨 horizon 比较，不代表考虑持仓重叠、资金分层和交易成本后的组合净值。
+- 对 `h>1` 的重叠远期收益，`diagnostic_max_drawdown` 明确设为不可用，并通过 `not_applicable_reason=overlapping_forward_returns` 说明原因；旧 `max_drawdown` 字段只作为历史兼容字段保留。
+- 原 `group_turnover` 明确更名解释为相邻因子日的分组成员变化率。新增 `group_membership_change_*` 表名，旧 `group_turnover_*` 文件名继续保留，避免破坏既有读取脚本。
+- 最终 HTML report 已接入年度 IC、HAC 统计、日等效多空曲线、回撤适用性和成员变化率说明；数据模式运行后仍可从 tables 重渲染完整报告。
+- 测试增加 HAC lag、外部收益未知 horizon、年度 IC、自然 horizon 排序、日等效多空 spread、多日回撤限制和报告接入覆盖。
 
 ## v2.2.3 更新内容
 
@@ -306,6 +320,7 @@ enabled_sections = "all"
 - `data_quality`
 - `ic_overview`
 - `cumulative_ic`
+- `yearly_ic`
 - `factor_style_exposure`
 - `style_neutralized_ic`
 - `style_industry_neutralized_ic`
@@ -407,8 +422,8 @@ run_factor_backtest(..., factor_name="factor_dm_20d")
 每次运行完成后可以直接打开单次 run 目录下的 `report.html`。报告会按股票池分别汇总：
 
 - 本次回测参数和 warning
-- 关键图表：data quality、20D IC 移动平均、累计 IC、10 分组平均收益、按 horizon 拆分的 10 组累计收益线图、分层收益、累计多空收益
-- 关键统计表：IC statistics、group return summary、layered group return summary、cumulative long-short tail、performance metrics
+- 关键图表：累计 IC、20D IC 移动平均、年度 IC、10 分组平均收益、按 horizon 拆分的 10 组累计收益线图、分层收益、日等效累计多空 spread、因子覆盖率和分组成员变化率
+- 关键统计表：IC statistics、yearly IC statistics、group return summary、layered group return summary、daily-equivalent long-short tail、long-short diagnostics
 - 模块状态，以及到 `plots/`、`tables/`、`artifacts/` 的相对链接；`artifacts/` 只有在 `artifact_level="full"` 时存在
 
 如果 `artifact_level="full"` 且服务器安装了 `pyarrow` 或 `fastparquet`，中间结果会保存为 `.parquet`。如果当前 Python 环境缺少 parquet 引擎，框架会明确保存为 `.parquet.pkl`，不会把 pickle 文件伪装成 parquet 后缀。
@@ -417,7 +432,7 @@ PNG 图表标题统一使用英文，避免服务器缺少中文字体时出现 
 
 1D、5D、10D、20D 的主色调仍分别是蓝、橙、绿、红，但默认使用更柔和的十六进制颜色：`#4C78A8`、`#F58518`、`#54A24B`、`#E45756`。所有 horizon 相关图表都会复用这套颜色。
 
-`long_short_curve.png` 展示的是日度多空收益差的累计和，即 `cumulative_long_short_returns = daily_long_short_returns.cumsum()`。原始日度序列仍保存为 `daily_long_short_returns`，用于后续统计指标计算。
+`long_short_curve.png` 展示日等效多空 spread 的累计和。对 `h>1`，框架先分别把 G10 和 G1 的 h 日收益转换为 `(1 + group_return) ** (1 / h) - 1`，再计算 `daily_equivalent_G10 - daily_equivalent_G1` 并累计。该曲线用于统一不同 horizon 的诊断尺度，不是考虑持仓重叠、资金分层和交易成本后的可交易组合净值。旧表 `cumulative_long_short_returns` 仍保留原始重叠收益的累计和以兼容现有下游，新报告使用 `cumulative_daily_equivalent_long_short_returns`。
 `long_short = G10 - G1` 是固定方向的高因子值组减低因子值组 spread 诊断，不会自动判断因子正负方向。若因子方向未知，阅读分组收益、分组暴露和分组换手时应同时看 G1 与 G10。
 `run_log.json` 会记录每次回测的 `timings`，包括全局耗时、每个 pool 的准备/核心计算/写 artifacts 阶段耗时，以及每个 section 的 compute/render/write/total 秒数。可以用它跟踪性能瓶颈；当 `artifact_level="none"` 时，写 artifacts 阶段通常接近 0。
 
@@ -477,6 +492,12 @@ cfg = BacktestConfig(ic_methods=["spearman", "pearson"])
 
 Spearman 衡量因子排序和未来收益排序的相关性，适合默认的截面排序评价。Pearson 衡量因子原始数值和未来收益数值的线性相关性，可作为可选诊断。兼容表名 `daily_ic`、`cumulative_ic`、`ic_stats` 在包含 Spearman 时指向 Spearman；如果只配置 Pearson，则指向唯一可用的 Pearson。新输出会同时保留带方法名的结果，例如 `daily_ic_spearman`、`ic_stats_spearman`、`cumulative_ic_spearman.png`。如果启用 Pearson，会额外输出 `daily_ic_pearson`、`ic_stats_pearson`、`cumulative_ic_pearson.png` 和 `ic_overview_pearson.png`。
 
+IC 统计默认同时输出普通 t-stat 和 Newey-West HAC t-stat。内置 1D/5D/10D/20D 收益的 HAC lag 分别为 `0/4/9/19`，即 `horizon_days - 1`；外部收益使用其显式配置的 `horizon_days - 1`。外部收益未提供 `horizon_days` 时，HAC t-stat 为 `NaN` 并给出 warning，不猜测持有期。报告默认展示 `t_stat_hac`；`t_stat` 和 `t_stat_naive` 作为旧口径保留。
+
+`icir_raw = ic_mean / ic_std` 是未年化 ICIR。兼容字段 `icir` 暂时保留相同数值，不应与另行计算的年化 ICIR 混用。多空诊断中的 `mean_over_std_raw` 同样未年化，旧字段 `sharpe` 仅作为兼容字段保留，不再在报告中称为 Sharpe。
+
+默认 `yearly_ic` 模块按因子日期 `trade_date` 所在自然年汇总每日 IC，并输出 `yearly_ic_stats_spearman.csv`、可选的 Pearson 表，以及 `yearly_mean_ic_spearman.png`/`yearly_mean_ic_pearson.png`。`yearly_ic_min_days=60` 控制每个“年份 × horizon”的最小有效 IC 天数；不足时保留 `valid_days` 记录，但统计值为 `NaN`。`yearly_ic_include_partial_year=True` 默认保留首尾不完整年份，并通过 `is_complete_year` 标识；设置为 `False` 可排除不完整年份。年份按因子日归属，即使多日收益的退出日在下一年，也仍计入因子日所在年份。
+
 ## 风格暴露和行业数据
 
 如需检查因子和 Barra10 风格暴露的关系，或计算风格/行业中性化 IC，可以把风险暴露和行业数据放在：
@@ -525,7 +546,7 @@ leverage, growth, earnings_yield, beta, residual_volatility
 - `style_industry_neutralized_ic`：用 `factor = intercept + Barra10 + industry dummies + residual` 的 residual 计算 IC。
 - `group_exposure_diagnostics`：每天按因子分成 G1-G10 后，输出 pool、G1、G10、G10-G1、G1-pool、G10-pool 的风格暴露和行业暴露。这里会同时关注最低组和最高组，不把 G10 视为唯一重点。
 - `within_industry_group_return`：每日在每个行业内部按因子分组，再跨行业合并同组股票收益。
-- `group_turnover`：输出 G1-G10 全部分组的日度换手率，并单独汇总 G1、G10 和 edge_avg。`edge_avg` 是 G1 与 G10 换手率的简单平均，用来观察两端组合整体换手压力。
+- `group_turnover`：计算相邻因子日同一分组的成员变化率 `1 - |previous ∩ current| / |current|`，并单独汇总 G1、G10 和 edge_avg。它不考虑持有期、权重漂移、分层资金或交易成本，因此不是可交易组合的真实换手率。新表别名使用 `group_membership_change_*`，旧 `group_turnover_*` 文件名继续保留以兼容现有调用。
 
 其中 `group_turnover` 不依赖风险暴露数据；即使设置 `risk_exposure_source="none"`，`enabled_sections="all"` 仍会输出分组换手率。其他风格、行业、中性化模块依赖 `risk_exposure`。
 
@@ -797,7 +818,7 @@ cfg = BacktestConfig(
 | `topk_overlap_k` | `50` | crowding 多空两端 overlap 的 TopK |
 | `crowding_threshold` | `0.7` | 预留配置；当前 `n_peers_above_0.7` 固定按字段名里的 `0.7` 计算 |
 | `min_similarity_stocks` | `30` | RankCorr、残差化和增量 R2 的最小有效股票数 |
-| `framework_version` | `"Factor_Backtest_2_2_1"` | 写入 diagnostics `meta.framework_version` |
+| `framework_version` | `"Factor_Backtest_2_3_0"` | 写入 diagnostics `meta.framework_version` |
 
 主要口径：
 

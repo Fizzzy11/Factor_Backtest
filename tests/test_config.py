@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from factor_backtest import __version__
 from factor_backtest.config import BacktestConfig, DEFAULT_HORIZON_COLORS, POOL_REGISTRY, ClickHouseConfig, ClickHouseTableConfig, PathConfig
 
 
@@ -28,7 +29,10 @@ def test_backtest_config_defaults_match_design():
     assert cfg.handoff.output_dir == Path("docs/handoffs/factor_backtest_platform")
     assert cfg.diagnostics.enabled is False
     assert cfg.diagnostics.hypothesis_direction == "unknown"
+    assert cfg.diagnostics.framework_version == "Factor_Backtest_2_3_0"
     assert cfg.group_return_windows == {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
+    assert cfg.yearly_ic_min_days == 60
+    assert cfg.yearly_ic_include_partial_year is True
     assert cfg.verbose is True
     assert cfg.data_sources.market_data_source == "clickhouse"
     assert cfg.data_sources.pool_source == "csv"
@@ -36,6 +40,7 @@ def test_backtest_config_defaults_match_design():
     assert cfg.data_sources.risk_exposure_source == "csv"
     assert cfg.data_sources.clickhouse == ClickHouseConfig()
     assert cfg.data_sources.clickhouse_tables == ClickHouseTableConfig()
+    assert __version__ == "2.3.0"
 
 
 def test_path_config_normalizes_string_paths():

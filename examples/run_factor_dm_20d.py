@@ -43,6 +43,10 @@ def main() -> None:
     # Used by group_return, group_exposure_diagnostics, and group_turnover.
     min_group_stocks = 10
     analysis_windows = [120, 250, 750]
+    # 年度 IC 每个“年份 × 收益标签”至少需要的有效 IC 天数。
+    yearly_ic_min_days = 60
+    # True 保留回测首尾可能不完整的年份，并在结果中标识完整性。
+    yearly_ic_include_partial_year = True
     group_return_windows = {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
 
     # ===== 5. Factor preprocessing parameters =====
@@ -197,6 +201,8 @@ def main() -> None:
         min_group_stocks=min_group_stocks,
         min_industry_ic_stocks=min_industry_ic_stocks,
         analysis_windows=analysis_windows,
+        yearly_ic_min_days=yearly_ic_min_days,
+        yearly_ic_include_partial_year=yearly_ic_include_partial_year,
         group_return_windows=group_return_windows,
         winsorize_factor=winsorize_factor,
         standardize_factor=standardize_factor,

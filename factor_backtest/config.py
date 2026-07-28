@@ -100,7 +100,7 @@ class CompanyDiagnosticsConfig:
     topk_overlap_k: int = 50
     crowding_threshold: float = 0.7
     min_similarity_stocks: int = 30
-    framework_version: str = "Factor_Backtest_2_2_1"
+    framework_version: str = "Factor_Backtest_2_3_0"
 
     def __post_init__(self) -> None:
         for name in ("production_book_path", "peer_book_path", "factor_meta_path", "factor_ls_pnl_path", "regime_path"):
@@ -163,6 +163,8 @@ class BacktestConfig:
     min_group_stocks: int = 10
     min_industry_ic_stocks: int = 10
     analysis_windows: list[int] = field(default_factory=lambda: [120, 250, 750])
+    yearly_ic_min_days: int = 60
+    yearly_ic_include_partial_year: bool = True
     group_return_windows: dict[str, int] = field(
         default_factory=lambda: {"6m": 120, "1y": 250, "3y": 750, "5y": 1250}
     )
@@ -180,6 +182,8 @@ class BacktestConfig:
     def __post_init__(self) -> None:
         if self.artifact_level not in {"full", "none"}:
             raise ValueError("artifact_level must be 'full' or 'none'")
+        if self.yearly_ic_min_days <= 0:
+            raise ValueError("yearly_ic_min_days must be positive")
         if self.output_root is None:
             self.output_root = self.paths.data_root / "Factor_Backtest_Result"
         else:

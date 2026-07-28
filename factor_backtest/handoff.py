@@ -289,10 +289,10 @@ Factor_Backtest 的标准日频因子输入是宽表：index 为交易日期，c
 
 ## 6. 5 张核心表
 
-- `ic_stats_spearman.csv`：Spearman Rank IC 统计表，按收益 horizon 输出均值、标准差、t-stat、正负比例等 IC 汇总字段；IC 本身不是收益率，不年化。
+- `ic_stats_spearman.csv`：Spearman Rank IC 统计表，按收益 horizon 输出均值、标准差、未年化 ICIR、普通 t-stat、Newey-West HAC t-stat、正值比例和有效天数；多日重叠窗口应优先使用 HAC t-stat。
 - `group_return_summary.csv`：分组收益汇总，至少包含 G1/G10，通常也包含 G10-G1；收益字段为持有期收益序列的统计结果。
-- `performance_metrics.csv`：基于多空收益或组合收益计算的表现指标，年化字段按日频序列折算。
-- `group_turnover_edge_summary.csv`：边际组换手率汇总，重点覆盖 G1、G10 和 edge average；当前换手率是成员单边换手定义，范围通常在 0 到 1。
+- `performance_metrics.csv`：基于原始多空远期收益的诊断指标。`mean_over_std_raw` 和兼容字段 `sharpe` 均未年化；`h>1` 的重叠收益不提供可实现组合最大回撤。
+- `group_turnover_edge_summary.csv`：兼容文件名，实际是相邻因子日的分组成员变化率汇总，重点覆盖 G1、G10 和 edge average；它不是考虑持有期和权重后的真实换手率。
 - `data_quality.csv`：因子覆盖率、过滤后有效股票数等数据质量字段，用于确认样本不是空跑。
 
 ## 7. 停牌、涨跌停、ST、新股、缺失值

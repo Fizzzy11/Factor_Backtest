@@ -823,24 +823,112 @@ def _column_corr(left: np.ndarray, right: np.ndarray, *, finite: np.ndarray, min
     return corr
 
 
-def compute_ic_stats(ic: pd.DataFrame) -> pd.DataFrame:
+def compute_newey_west_mean_t_stat(series: pd.Series, lag: int) -> tuple[float, int]:
+    values = pd.to_numeric(series, errors="coerce").dropna().to_numpy(dtype="float64")
+    if lag < 0:
+        raise ValueError("Newey-West lag must be non-negative")
+    if len(values) < 2:
+        return np.nan, 0
+    effective_lag = min(int(lag), len(values) - 1)
+    residuals = values - values.mean()
+    long_run_variance = float(np.dot(residuals, residuals) / len(values))
+    for offset in range(1, effective_lag + 1):
+        weight = 1.0 - offset / (effective_lag + 1.0)
+        autocovariance = float(np.dot(residuals[offset:], residuals[:-offset]) / len(values))
+        long_run_variance += 2.0 * weight * autocovariance
+    if not np.isfinite(long_run_variance) or long_run_variance <= 0:
+        return np.nan, effective_lag
+    standard_error = math.sqrt(long_run_variance / len(values))
+    if standard_error <= 0:
+        return np.nan, effective_lag
+    return float(values.mean() / standard_error), effective_lag
+
+
+def compute_ic_stats(
+    ic: pd.DataFrame,
+    horizon_days: dict[str, int | None] | None = None,
+) -> pd.DataFrame:
     rows = []
     for col in ic.columns:
         horizon = col.replace("ic_", "")
         s = pd.to_numeric(ic[col], errors="coerce").dropna()
         mean = float(s.mean()) if not s.empty else np.nan
         std = float(s.std(ddof=1)) if len(s) > 1 else np.nan
+        resolved_horizon_days = _resolve_horizon_days(horizon, horizon_days)
+        requested_lag = resolved_horizon_days - 1 if resolved_horizon_days is not None else None
+        t_stat_hac, effective_lag = (
+            compute_newey_west_mean_t_stat(s, requested_lag)
+            if requested_lag is not None
+            else (np.nan, np.nan)
+        )
+        t_stat_naive = mean / (std / math.sqrt(len(s))) if std and len(s) > 1 and not math.isnan(std) else np.nan
         rows.append(
             {
                 "horizon": horizon,
                 "ic_mean": mean,
                 "ic_std": std,
-                "icir": mean / std if std and not math.isnan(std) else np.nan,
+                "icir_raw": mean / std if std and not math.isnan(std) else np.nan,
                 "ic_positive_ratio": float((s > 0).mean()) if not s.empty else np.nan,
-                "t_stat": mean / (std / math.sqrt(len(s))) if std and len(s) > 1 and not math.isnan(std) else np.nan,
+                "t_stat_naive": t_stat_naive,
+                "t_stat_hac": t_stat_hac,
+                "hac_lag": effective_lag,
+                "valid_days": int(len(s)),
+                "hac_status": "ok" if requested_lag is not None else "missing_horizon_days",
+                # 以下字段保留一个兼容周期，新增调用应使用含义明确的新字段。
+                "icir": mean / std if std and not math.isnan(std) else np.nan,
+                "t_stat": t_stat_naive,
             }
         )
     return pd.DataFrame(rows).set_index("horizon")
+
+
+def compute_yearly_ic_stats(
+    ic: pd.DataFrame,
+    *,
+    horizon_days: dict[str, int | None] | None = None,
+    min_days: int = 60,
+    include_partial_year: bool = True,
+) -> pd.DataFrame:
+    if min_days <= 0:
+        raise ValueError("yearly IC min_days must be positive")
+    if ic.empty:
+        return pd.DataFrame()
+    dates = pd.DatetimeIndex(pd.to_datetime(ic.index))
+    records = []
+    for year in sorted(dates.year.unique()):
+        year_mask = dates.year == year
+        year_dates = dates[year_mask]
+        is_complete_year = bool(year_dates.min().month == 1 and year_dates.max().month == 12)
+        if not include_partial_year and not is_complete_year:
+            continue
+        year_ic = ic.loc[year_mask]
+        stats = compute_ic_stats(year_ic, horizon_days=horizon_days)
+        for horizon, row in stats.iterrows():
+            valid_days = int(row["valid_days"])
+            meets_min_days = valid_days >= min_days
+            records.append(
+                {
+                    "year": int(year),
+                    "horizon": horizon,
+                    "ic_mean": row["ic_mean"] if meets_min_days else np.nan,
+                    "ic_std": row["ic_std"] if meets_min_days else np.nan,
+                    "icir_raw": row["icir_raw"] if meets_min_days else np.nan,
+                    "ic_positive_ratio": row["ic_positive_ratio"] if meets_min_days else np.nan,
+                    "t_stat_hac": row["t_stat_hac"] if meets_min_days else np.nan,
+                    "hac_lag": row["hac_lag"],
+                    "valid_days": valid_days,
+                    "start_date": year_dates.min(),
+                    "end_date": year_dates.max(),
+                    "is_complete_year": is_complete_year,
+                    "meets_min_days": meets_min_days,
+                }
+            )
+    if not records:
+        return pd.DataFrame()
+    out = pd.DataFrame(records)
+    horizon_order = {label: position for position, label in enumerate(sort_return_labels(out["horizon"].unique()))}
+    out["_horizon_order"] = out["horizon"].map(horizon_order)
+    return out.sort_values(["year", "_horizon_order"]).drop(columns="_horizon_order").set_index(["year", "horizon"])
 
 
 def compute_daily_group_returns(
@@ -894,6 +982,34 @@ def compute_long_short_returns(group_returns: pd.DataFrame, low_group: int = 1, 
     return out
 
 
+def compute_daily_equivalent_long_short_returns(
+    group_returns: pd.DataFrame,
+    *,
+    horizon_days: dict[str, int | None] | None = None,
+    low_group: int = 1,
+    high_group: int = 10,
+) -> tuple[pd.DataFrame, list[str]]:
+    if group_returns.empty:
+        return pd.DataFrame(), []
+    wide = group_returns["group_return"].unstack(["horizon", "group"])
+    out = pd.DataFrame(index=wide.index)
+    skipped = []
+    for horizon in sort_return_labels({value for value, _ in wide.columns}):
+        label = return_label(horizon)
+        resolved_horizon_days = _resolve_horizon_days(label, horizon_days)
+        if resolved_horizon_days is None:
+            skipped.append(label)
+            continue
+        low_key = (horizon, low_group)
+        high_key = (horizon, high_group)
+        if low_key not in wide.columns or high_key not in wide.columns:
+            continue
+        low = _return_to_daily_equivalent(wide[low_key], resolved_horizon_days)
+        high = _return_to_daily_equivalent(wide[high_key], resolved_horizon_days)
+        out[f"long_short_{label}"] = high - low
+    return out, skipped
+
+
 def compute_quality_metrics(
     factor: pd.DataFrame,
     pool_mask: pd.DataFrame,
@@ -913,23 +1029,74 @@ def compute_quality_metrics(
     return out
 
 
-def compute_performance_metrics(long_short: pd.DataFrame) -> pd.DataFrame:
+def compute_performance_metrics(
+    long_short: pd.DataFrame,
+    horizon_days: dict[str, int | None] | None = None,
+) -> pd.DataFrame:
     rows = []
     for col in long_short.columns:
         s = pd.to_numeric(long_short[col], errors="coerce").dropna()
         mean = float(s.mean()) if not s.empty else np.nan
         std = float(s.std(ddof=1)) if len(s) > 1 else np.nan
         nav = (1 + s).cumprod() if not s.empty else pd.Series(dtype=float)
-        max_dd = float((nav / nav.cummax() - 1).min()) if not nav.empty else np.nan
+        legacy_max_dd = float((nav / nav.cummax() - 1).min()) if not nav.empty else np.nan
+        horizon = col.removeprefix("long_short_")
+        resolved_horizon_days = _resolve_horizon_days(horizon, horizon_days)
+        requested_lag = resolved_horizon_days - 1 if resolved_horizon_days is not None else None
+        t_stat_hac, effective_lag = (
+            compute_newey_west_mean_t_stat(s, requested_lag)
+            if requested_lag is not None
+            else (np.nan, np.nan)
+        )
+        t_stat_naive = mean / (std / math.sqrt(len(s))) if std and len(s) > 1 and not math.isnan(std) else np.nan
+        drawdown_applicable = resolved_horizon_days == 1
+        reason = ""
+        if resolved_horizon_days is None:
+            reason = "unknown_horizon_days"
+        elif resolved_horizon_days > 1:
+            reason = "overlapping_forward_returns"
         rows.append(
             {
                 "series": col,
+                "raw_mean": mean,
+                "raw_std": std,
+                "mean_over_std_raw": mean / std if std and not math.isnan(std) else np.nan,
+                "positive_ratio": float((s > 0).mean()) if not s.empty else np.nan,
+                "t_stat_naive": t_stat_naive,
+                "t_stat_hac": t_stat_hac,
+                "hac_lag": effective_lag,
+                "valid_days": int(len(s)),
+                "diagnostic_max_drawdown": legacy_max_dd if drawdown_applicable else np.nan,
+                "max_drawdown_applicable": drawdown_applicable,
+                "not_applicable_reason": reason,
+                "hac_status": "ok" if requested_lag is not None else "missing_horizon_days",
+                # 以下字段保留一个兼容周期，新增调用应使用含义明确的新字段。
                 "mean": mean,
                 "std": std,
                 "sharpe": mean / std if std and not math.isnan(std) else np.nan,
-                "max_drawdown": max_dd,
+                "max_drawdown": legacy_max_dd,
                 "win_rate": float((s > 0).mean()) if not s.empty else np.nan,
-                "t_stat": mean / (std / math.sqrt(len(s))) if std and len(s) > 1 and not math.isnan(std) else np.nan,
+                "t_stat": t_stat_naive,
             }
         )
     return pd.DataFrame(rows).set_index("series") if rows else pd.DataFrame()
+
+
+def _resolve_horizon_days(
+    horizon,
+    horizon_days: dict[str, int | None] | None,
+) -> int | None:
+    label = return_label(horizon)
+    if horizon_days is not None and label in horizon_days:
+        value = horizon_days.get(label)
+        return int(value) if value is not None else None
+    if label.endswith("d") and label[:-1].isdigit():
+        return int(label[:-1])
+    return None
+
+
+def _return_to_daily_equivalent(returns: pd.Series, horizon_days: int) -> pd.Series:
+    if horizon_days <= 1:
+        return returns
+    valid = returns.where(returns > -1.0)
+    return (1.0 + valid) ** (1.0 / horizon_days) - 1.0

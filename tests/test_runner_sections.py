@@ -31,6 +31,7 @@ from factor_backtest.sections import (
     LongShortSection,
     ReportSection,
     SectionResult,
+    YearlyICSection,
     select_plot_title,
 )
 
@@ -374,7 +375,7 @@ def test_runner_renders_risk_exposure_sections_when_csv_source_is_configured():
         assert "Cumulative Style Neutralized Spearman RankIC" in rerendered_html
         assert "Within-Industry 10-Group Forward Returns" in rerendered_html
         assert "Group Style Exposure G1" in rerendered_html
-        assert "Group Turnover Edge Summary" in rerendered_html
+        assert "Group Membership Change Edge Summary" in rerendered_html
 
 
 def test_runner_can_write_neutralized_factor_tables_when_enabled():
@@ -572,7 +573,7 @@ def test_group_exposure_and_turnover_sections_render_edge_group_outputs():
         html = (result.latest_dir / "report.html").read_text(encoding="utf-8")
         assert "Group Style Exposure G1" in html
         assert "Group Style Exposure G10" in html
-        assert "Group Turnover Edge Summary" in html
+        assert "Group Membership Change Edge Summary" in html
 
 
 def test_group_exposure_industry_plots_use_ascii_labels_for_cjk_columns():
@@ -889,13 +890,63 @@ def test_ic_sections_emit_method_specific_tables_and_plots():
 def test_long_short_section_plots_cumulative_series():
     dates = pd.to_datetime(["2026-05-15", "2026-05-18", "2026-05-19"])
     daily = pd.DataFrame({"long_short_1d": [0.01, -0.02, 0.03]}, index=dates)
+    records = []
+    for date, spread in zip(dates, daily["long_short_1d"]):
+        records.extend(
+            [
+                {"trade_date": date, "horizon": 1, "group": 1, "group_return": 0.0},
+                {"trade_date": date, "horizon": 1, "group": 10, "group_return": spread},
+            ]
+        )
+    group_returns = pd.DataFrame(records).set_index(["trade_date", "horizon", "group"])
     section = LongShortSection()
 
-    result = section.compute({"daily_long_short_returns": daily})
+    result = section.compute(
+        {
+            "daily_long_short_returns": daily,
+            "daily_group_returns": group_returns,
+            "return_horizon_days": {"1d": 1},
+            "plot_index": dates,
+        }
+    )
 
     assert result.tables["daily_long_short_returns"].equals(daily)
     expected = pd.DataFrame({"long_short_1d": [0.01, -0.01, 0.02]}, index=dates)
     pd.testing.assert_frame_equal(result.tables["cumulative_long_short_returns"], expected)
+    pd.testing.assert_frame_equal(result.tables["cumulative_daily_equivalent_long_short_returns"], expected)
+
+
+def test_yearly_ic_section_outputs_method_specific_tables_and_plots():
+    dates = pd.to_datetime(["2024-01-02", "2024-07-01", "2024-12-30", "2025-01-02"])
+    daily_ic_by_method = {
+        "spearman": pd.DataFrame({"ic_1d": [0.1, 0.2, 0.3, 0.4]}, index=dates),
+        "pearson": pd.DataFrame({"ic_1d": [0.2, 0.1, 0.4, 0.3]}, index=dates),
+    }
+    context = {
+        "daily_ic_by_method": daily_ic_by_method,
+        "daily_ic": daily_ic_by_method["spearman"],
+        "return_horizon_days": {"1d": 1},
+        "yearly_ic_min_days": 2,
+        "yearly_ic_include_partial_year": True,
+        "plots_dir": Path("."),
+        "horizon_colors": {1: "#111111"},
+    }
+    section = YearlyICSection()
+    result = section.compute(context)
+    original_plot_lines = sections_module._plot_lines
+    try:
+        sections_module._plot_lines = lambda df, path, title, result, **kwargs: result.plots.update(
+            {Path(path).name: title}
+        )
+        result = section.render(context, result)
+    finally:
+        sections_module._plot_lines = original_plot_lines
+
+    assert "yearly_ic_stats_spearman" in result.tables
+    assert "yearly_ic_stats_pearson" in result.tables
+    assert "yearly_mean_ic_spearman" in result.tables
+    assert "yearly_mean_ic_spearman.png" in result.plots
+    assert result.tables["yearly_ic_stats_spearman"].loc[(2024, "1d"), "valid_days"] == 3
 
 
 def test_layered_group_return_section_summarizes_windows():
@@ -1137,6 +1188,7 @@ def test_html_report_orders_key_plots_by_analysis_flow():
         plot_specs = [
             ("ic_overview", "ic_overview.png"),
             ("cumulative_ic", "cumulative_ic.png"),
+            ("yearly_ic", "yearly_mean_ic_spearman.png"),
             ("factor_style_exposure", "factor_style_exposure_corr_spearman.png"),
             ("style_neutralized_ic", "cumulative_style_neutralized_ic_spearman.png"),
             ("style_industry_neutralized_ic", "cumulative_style_industry_neutralized_ic_spearman.png"),
@@ -1173,6 +1225,7 @@ def test_html_report_orders_key_plots_by_analysis_flow():
         expected_titles = [
             "Cumulative RankIC",
             "20-Day Moving Average RankIC",
+            "Yearly Mean Spearman RankIC",
             "10-Group Cumulative Return 1D",
             "10-Group Cumulative Return 5D",
             "10-Group Cumulative Return 10D",
@@ -1182,7 +1235,7 @@ def test_html_report_orders_key_plots_by_analysis_flow():
             "10-Group Forward Returns 1Y",
             "10-Group Forward Returns 3Y",
             "10-Group Forward Returns 5Y",
-            "Cumulative Long-Short Return",
+            "Cumulative Daily-Equivalent Long-Short Spread (Diagnostic)",
             "Factor Coverage Counts",
             "Factor Coverage and Invalid Value Ratios",
             "Factor Style Exposure Correlation Spearman",
@@ -1192,7 +1245,7 @@ def test_html_report_orders_key_plots_by_analysis_flow():
             "Group Industry Exposure G10 - G1",
             "Within-Industry 10-Group Forward Returns",
             "Within-Industry 10-Group Cumulative Return 1D",
-            "G1 and G10 Turnover",
+            "Daily G1 and G10 Membership Change",
         ]
         positions = [html.index(title) for title in expected_titles]
         assert positions == sorted(positions)
@@ -1271,7 +1324,7 @@ def test_render_report_from_existing_result_files():
         assert report_path == result.run_dir / "report.html"
         html = report_path.read_text(encoding="utf-8")
         assert "IC Statistics" in html
-        assert "Performance Metrics" in html
+        assert "Long-Short Diagnostics" in html
 
 
 def test_data_only_run_can_be_rendered_later():
